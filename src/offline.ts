@@ -9,7 +9,7 @@ export async function registerOffline(): Promise<void> {
     return;
 
   try {
-    const script = new URL(`${import.meta.env.BASE_URL}sw.js`, window.location.href);
+    const script = new URL(`${import.meta.env.BASE_URL}sw.js`, document.baseURI);
     if (script.origin !== window.location.origin) return;
     await navigator.serviceWorker.register(script.href, {
       scope: new URL('./', script).href,

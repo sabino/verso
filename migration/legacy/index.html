@@ -1,0 +1,38 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+    <meta name="theme-color" content="#05232b" />
+    <meta name="application-name" content="Verso" />
+    <base href="/verso/" />
+    <link rel="manifest" href="/games/verso/manifest.webmanifest" />
+    <link rel="icon" type="image/svg+xml" href="/verso/icon.svg" />
+    <link rel="apple-touch-icon" sizes="180x180" href="/verso/apple-touch-icon.png" />
+    <title>Verso — A life of your own</title>
+    <style>
+      html {
+        background: #05232b;
+        color: #e5e5cc;
+        font:
+          16px system-ui,
+          sans-serif;
+      }
+      #legacy-status {
+        max-width: 30rem;
+        margin: 18vh auto;
+        padding: 1.5rem;
+        line-height: 1.6;
+      }
+      #legacy-status a {
+        color: #d4bb72;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="app"></div>
+    <p id="legacy-status" role="status">Opening Verso…</p>
+    <noscript>Verso needs JavaScript to open your life.</noscript>
+    <script type="module" src="/games/verso/bridge.js"></script>
+  </body>
+</html>
