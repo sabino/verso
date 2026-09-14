@@ -77,10 +77,20 @@ function fixture(version = 1) {
   };
 }
 
-async function runtime(options: { timeout?: number } = {}) {
+async function runtime(
+  options: { timeout?: number; additionalFiles?: Record<string, string> } = {},
+) {
   const stores = new Map<string, Map<string, Response>>();
   const requests: Request[] = [];
-  let current = fixture();
+  const releaseFixture = (version = 1) => {
+    const result = fixture(version);
+    for (const [name, bytes] of Object.entries(options.additionalFiles ?? {})) {
+      result.files[name] = bytes;
+      result.release.assets[name] = { sha256: hash(bytes), bytes: Buffer.byteLength(bytes) };
+    }
+    return result;
+  };
+  let current = releaseFixture();
   let unavailable = false;
   let badPath = '';
   let stalled = false;
@@ -167,7 +177,7 @@ async function runtime(options: { timeout?: number } = {}) {
       networkHook = value;
     },
     set version(value: number) {
-      current = fixture(value);
+      current = releaseFixture(value);
     },
     set offline(value: boolean) {
       unavailable = value;
@@ -187,6 +197,66 @@ async function runtime(options: { timeout?: number } = {}) {
     },
   };
 }
+
+test('legacy bridge skips only the unused canonical HTML document and still opens its own shell offline', async () => {
+  const canonicalIndex =
+    '<!doctype html><script type="module" src="./assets/index-game1.js"></script>';
+  const r = await runtime({
+    additionalFiles: {
+      'index.html': canonicalIndex,
+      'audio/step.mp3': 'original synthetic media bytes',
+    },
+  });
+  r.networkHook = async (request: Request) => {
+    if (new URL(request.url).pathname === '/verso/index.html')
+      return new Response(canonicalIndex + '<link href="/cdn-cgi/edge-injected.css">');
+  };
+  await r.bridge.refresh();
+  await r.bridge.activate();
+  assert.ok(!r.requests.some((request) => new URL(request.url).pathname === '/verso/index.html'));
+  assert.ok([...r.stores.values()].every((cache) => !cache.has(origin + '/verso/index.html')));
+  assert.ok(r.requests.some((request) => request.url === origin + '/verso/audio/step.mp3'));
+  r.offline = true;
+  assert.match(
+    await (await r.request('/games/verso/?room=ABC#invite=123', 'navigate'))!.text(),
+    /legacy shell/,
+  );
+  assert.equal(
+    await (await r.request('/verso/assets/index-game1.js'))!.text(),
+    fixture().files['assets/index-game1.js'],
+  );
+  assert.equal(
+    await (await r.request('/verso/audio/step.mp3'))!.text(),
+    'original synthetic media bytes',
+  );
+});
+
+test('excluding unused canonical HTML never exempts used modules, styles, images or media from integrity checks', async () => {
+  for (const changed of [
+    'assets/index-game2.js',
+    'assets/lazy-game2.js',
+    'assets/game-style2.css',
+    'audio/step.mp3',
+    'icon.svg',
+  ]) {
+    const r = await runtime({
+      additionalFiles: { 'index.html': '<!doctype html>', 'audio/step.mp3': 'original media' },
+    });
+    await r.bridge.refresh();
+    r.version = 2;
+    r.corrupt = changed;
+    await assert.rejects(r.bridge.refresh(), /integrity|too large/);
+    r.offline = true;
+    assert.equal(
+      (await (await r.request('/verso/release.json'))!.json()).swVersion,
+      '1'.repeat(20),
+    );
+    assert.equal(
+      await (await r.request('/verso/assets/index-game1.js'))!.text(),
+      fixture().files['assets/index-game1.js'],
+    );
+  }
+});
 
 test('network deadline covers a stalled response body and retains the installed release', async () => {
   const r = await runtime({ timeout: 30 });

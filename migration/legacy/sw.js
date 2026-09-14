@@ -82,6 +82,10 @@ export function createBridgeWorker(env) {
     const cache = await env.caches.open(name);
     try {
       for (const [path, asset] of Object.entries(release.assets)) {
+        // Canonical navigation belongs to /verso/'s worker. This bridge serves its
+        // own legacy shell; edge-transformed, unused canonical HTML is not an asset
+        // it needs to fetch or cache. Every other declared asset stays hash-checked.
+        if (path === 'index.html') continue;
         const url = projectURL(path, origin);
         const response = await staticResponse(url, asset.bytes);
         const bytes = response.bytes;
