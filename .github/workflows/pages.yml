@@ -1,0 +1,105 @@
+name: Validate and publish Verso
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: pages-${{ github.ref }}
+  cancel-in-progress: false
+jobs:
+  validate:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - run: npm ci
+      - run: npm test
+      - run: npm run format:check
+      - run: npm run build
+      - name: Native portrait browser check
+        run: node scripts/ci-browser.mjs
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: browser-evidence
+          path: .dream-loop/ci-browser/
+          if-no-files-found: warn
+  build:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
+    needs: validate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      pages: read
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
+      - run: npm ci && npm run build
+      - name: Download pinned migration and last deployed asset archive
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: node scripts/fetch-pages-history.mjs
+      - name: Prepare immutable metadata and retained assets
+        run: |
+          node scripts/prepare-pages.mjs .dream-loop/pages-history/legacy-site.tar.gz .dream-loop/pages-history/retained-assets.tar.gz
+          tar -czf .dream-loop/pages-history/retained-assets-next.tar.gz -C dist assets
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: retained-assets
+          path: .dream-loop/pages-history/retained-assets-next.tar.gz
+      - uses: actions/upload-pages-artifact@56afc609e74202658d3ffba0e8f6dda462b719fa # v3
+        with:
+          path: dist
+  deploy:
+    needs: [build, retain]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Publish tested artifact
+        id: deployment
+        uses: actions/deploy-pages@d6db90164ac5ed86f2b6aed7e0febac5b3c0c03e # v4
+  retain:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: write
+      actions: read
+    steps:
+      - name: Preserve compatibility assets before publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          RELEASE_SHA: ${{ github.sha }}
+          RELEASE_RUN: ${{ github.run_id }}
+        run: |
+          gh run download "$RELEASE_RUN" --repo "$GH_REPO" --name retained-assets --dir retained
+          if gh release view "pages-$RELEASE_SHA" --repo "$GH_REPO" >/dev/null 2>&1; then
+            gh release upload "pages-$RELEASE_SHA" retained/retained-assets-next.tar.gz --repo "$GH_REPO" --clobber
+          else
+            gh release create "pages-$RELEASE_SHA" retained/retained-assets-next.tar.gz --repo "$GH_REPO" --target "$RELEASE_SHA" --title "Pages $RELEASE_SHA" --notes "Generated Pages compatibility assets. Source stays in git; build products remain release assets." --latest=false
+          fi

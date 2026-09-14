@@ -1,14 +1,16 @@
 # Verso
 
+Source: [sabino/verso](https://github.com/sabino/verso). Play at [sabino.pro/verso](https://sabino.pro/verso/); the existing [games/verso address](https://sabino.pro/games/verso/) uses the same build. [Repository, history and CI/CD](docs/REPOSITORY-AND-DEPLOYMENT.md).
+
 A browser RPG of unique humanoid lives, generated civilizations and shared worlds. Choose a generated resident, customize their appearance, enter their existing home and profession, gather supplies, construct production, trade, explore and meet other players. The galaxy chart gives seeded planets shared addresses; live play happens in rooms of up to eight people.
 
-**Theo Bishop’s story · Stíchos** is a separate legacy start. It preserves the authored Sallas investigation and Winter Compact in generation three. New generation-four lives, including residents of Stíchos, have their own histories, relationships and commitments.
+**Theo Bishop’s story · Stíchos** is an authored scenario in the same engine as generated lives. It reuses the renderer, controls, combat, construction, living world, saves and multiplayer systems; its Sallas investigation and Winter Compact supply different story content. Scenario identity is independent of terrain generation. [Shared story engine](docs/SHARED-STORY-ENGINE.md).
 
 ## Play and run
 
 **[Published game](https://sabino.pro/games/verso/)**. [PAGES.md](docs/stichos/PAGES.md) records the last verified public deployment; the source and local preview can be newer. The current life/universe and construction browser proofs are recorded in [QA.md](docs/stichos/QA.md).
 
-Use **Node.js 26**, the verified development runtime:
+CI uses **Node.js 24.15.0**; local development is also verified on Node.js 26:
 
 ```sh
 npm install

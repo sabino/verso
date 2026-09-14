@@ -1,6 +1,11 @@
 FROM node:24.15.0-alpine
 
+ARG SOURCE_COMMIT=unversioned
+LABEL org.opencontainers.image.source="https://github.com/sabino/verso" \
+    org.opencontainers.image.revision="${SOURCE_COMMIT}"
+
 ENV NODE_ENV=production \
+    VERSO_SOURCE_COMMIT=${SOURCE_COMMIT} \
     PORT=4175 \
     HOST=0.0.0.0 \
     VERSO_WORLD_STORAGE=/data/worlds \

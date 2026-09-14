@@ -41,6 +41,10 @@ export function createCoopServer({
   voice = {},
   ...roomOptions
 } = {}) {
+  // Image metadata only. Never expose arbitrary environment values or deployment secrets.
+  const sourceCommit = /^[a-f0-9]{40}$/.test(process.env.VERSO_SOURCE_COMMIT || '')
+    ? process.env.VERSO_SOURCE_COMMIT
+    : null;
   const hub = new CoopRooms({
     ...roomOptions,
     durable: !!persistenceDirectory || roomOptions.durable,
@@ -80,6 +84,7 @@ export function createCoopServer({
         res.end(
           JSON.stringify({
             ok: healthy,
+            sourceCommit,
             protocol: MULTIPLAYER_PROTOCOL,
             rooms: hub.rooms.size,
             players: [...hub.rooms.values()].reduce(

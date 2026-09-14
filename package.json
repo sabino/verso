@@ -10,8 +10,8 @@
     "preview": "vite preview --host 0.0.0.0",
     "test": "node --experimental-strip-types --test tests/*.test.ts",
     "check": "npm test && npm run build",
-    "format": "prettier --write src tests scripts docs *.ts *.html *.json README.md",
-    "format:check": "prettier --check src tests scripts docs *.ts *.html *.json README.md",
+    "format": "prettier --write .github migration src tests scripts docs *.ts *.html *.json README.md",
+    "format:check": "prettier --check .github migration src tests scripts docs *.ts *.html *.json README.md",
     "server": "node --experimental-strip-types server/index.mjs"
   },
   "devDependencies": {

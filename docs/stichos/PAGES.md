@@ -1,5 +1,7 @@
 # Published Verso
 
+**Current deployment:** [dedicated Verso repository and CI/CD](../REPOSITORY-AND-DEPLOYMENT.md). The process below records the earlier website-repository deployment and its historical verification. Do not publish new compiled bundles into the website repository.
+
 Play at **https://sabino.pro/games/verso/**.
 
 The static client is deployed from `sabino/sabino.github.io`, branch `master`, directory `games/verso`. The exact current source revision and production endpoints are published in [release.json](https://sabino.pro/games/verso/release.json). Publication overlays only `games/verso/` in an isolated Pages checkout and retains earlier hashed JavaScript/CSS assets for already-open clients; unrelated applications remain unchanged.

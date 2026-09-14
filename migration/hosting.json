@@ -1,0 +1,13 @@
+{
+  "repository": "sabino/verso",
+  "sourceHistoryBoundary": "8b88dc2e0321d236a28fb373c57d24385f096077",
+  "sourceCommitsPreserved": 179,
+  "canonicalUrl": "https://sabino.pro/verso/",
+  "legacyUrl": "https://sabino.pro/games/verso/",
+  "legacyArchive": {
+    "tag": "migration-2026-09-14",
+    "file": "legacy-site.tar.gz",
+    "sha256": "1c6bc53b70cce11c30f51a0de28c55230109482a623338bdc2d5a9d2379e49a8",
+    "websiteCommit": "3f7d82337f6b08313f6a6530d10274e2fe1e5361"
+  }
+}

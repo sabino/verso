@@ -1,5 +1,7 @@
 # Living systems and movement pace — approved rollout contract
 
+This is the historical 13 September rollout contract. The user subsequently authorized the [dedicated repository and CI/CD migration](REPOSITORY-AND-DEPLOYMENT.md); that document supersedes the repository/publication instructions below while preserving the data-retention requirements.
+
 The local systems gate is recorded in [the batch report](LIVING-SYSTEMS-LOCAL-BATCH.md). On 13 September 2026 the user authorized its deployment after adding dedicated Walk/Run controls. The source remains on `feat/living-systems-expansion`; the published source is identified by the production `games/verso/release.json`, not by an assumed latest local commit.
 
 ## Movement controls
