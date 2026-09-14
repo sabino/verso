@@ -6,13 +6,13 @@ The manually dispatched `World node — reviewed image deployment` workflow buil
 
 Before enabling or running the deployment job:
 
-1. Protect the `world-node-production` GitHub environment: allow only `main` deployments, configure a required reviewer and prevent self-review/bypass where the account plan supports it. Review workflow changes as production code.
+1. Protect the `world-node-production` GitHub environment: allow only `main` deployments. Review workflow changes as production code, and dispatch only the independently reviewed exact commit after operator preparation. Teams with another deployment owner can additionally require that reviewer and prevent self-review/bypass. The current single-owner setup uses main-only environment rules, independent source review and explicit operator dispatch.
 2. Enable the existing **verso-world application deployment token**, using its CapRover Deployment panel or the authenticated existing app-update route while preserving the entire current configuration. Transfer that token directly into environment secret `CAPROVER_APP_TOKEN`; never put the Captain administrator password or SSH key in Actions. The captured pre-migration configuration had app tokens disabled, so no usable credential is silently assumed.
 3. Publish the `ghcr.io/sabino/verso-world` package with access inherited from the public `sabino/verso` repository and explicitly make the package public. GHCR packages can initially be private even when the repository is public. The workflow uses its own short-lived `GITHUB_TOKEN` to publish. The deployed host needs no registry credential: anonymous digest/config verification must pass before the deployment request. First dispatch may build the package and then fail this gate until its visibility is set; it has not mutated production at that point.
 4. Set environment variable `VERSO_WORLD_DEPLOY_ENABLED=true` only after independent review and operator preparation. The helper rejects missing/disabled configuration before any network request.
 5. Capture the current image/revision, configuration hashes, private data/signing identity backup and a retention-safe rollback strategy. Supply the private capture's non-secret reference as the dispatch input. A reference is an operator attestation, not proof that an old image understands new saves. Never roll new data back to an old checkpoint. Keep the previously prepared guarded fallback and use forward repair when a schema downgrade would discard records.
 
-The GitHub environment is a real security boundary, not something a YAML declaration automatically protects. If the account cannot enforce the required gate, keep the enable variable unset and deploy with the reviewed local operator instead.
+The GitHub environment is a real security boundary, not something a YAML declaration automatically protects. If the account cannot enforce the main-only deployment restriction, keep the enable variable unset and deploy with the reviewed local operator instead.
 
 ## Dispatch and execution
 
