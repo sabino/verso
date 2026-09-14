@@ -132,6 +132,7 @@ import {
 import { civilizationFor, civilizationTechnologyTier } from './civilization.ts';
 import {
   generatePersonalStory,
+  lifeCultureFor,
   personalStoryView,
   restorePersonalStories,
   type PersonalStoryPlan,
@@ -1447,7 +1448,7 @@ export class Stichos {
       this.journal = [];
       this.entry(
         'A world before your arrival',
-        `A foreign awareness approaches an existing life in ${this.world.civilization!.name}. Its household, work and obligations already exist.`,
+        `A foreign awareness approaches an existing life in ${this.lifeCulture.name}. Its household, work and obligations already exist.`,
       );
     }
     this.refreshNpcs();
@@ -1459,8 +1460,16 @@ export class Stichos {
     return this.notebook;
   }
 
+  /** A story belongs to the selected life, not to the world's terrain revision. */
+  get storyScenario(): 'theo' | 'personal' {
+    return this.originRecord || this.world.generation === 4 ? 'personal' : 'theo';
+  }
   get universeLife() {
-    return this.world.generation === 4;
+    return this.storyScenario === 'personal';
+  }
+  private fallbackLifeCulture?: ReturnType<typeof lifeCultureFor>;
+  get lifeCulture() {
+    return this.world.civilization ?? (this.fallbackLifeCulture ??= lifeCultureFor(this.world));
   }
   get exposure() {
     return exposureAt(
@@ -1475,7 +1484,7 @@ export class Stichos {
   itemName(item: ItemId) {
     return (
       (this.universeLife
-        ? (this.world.civilization!.lexicon as Partial<Record<ItemId, string>>)[item]
+        ? (this.lifeCulture.lexicon as Partial<Record<ItemId, string>>)[item]
         : undefined) ?? ITEMS[item].name
     );
   }
@@ -4096,7 +4105,7 @@ export class Stichos {
     if (this.spaceId !== 'surface') {
       p.breath = clamp(p.breath + 0.25 * dt);
       p.warmth = clamp(p.warmth + 0.25 * dt);
-    } else if (this.universeLife) {
+    } else if (this.world.generation === 4) {
       const exposure = exposureAt(tile!, this.world.civilization?.axes, p.cequinTime > 0, running);
       p.breath = clamp(p.breath + exposure.breathRate * dt);
       p.warmth = clamp(p.warmth + exposure.warmthRate * dt);
@@ -5316,7 +5325,7 @@ export class Stichos {
         this.entry(
           this.universeLife ? 'A record outside the public ledger' : 'A record beneath the frost',
           this.universeLife
-            ? this.world.civilization!.story.mystery
+            ? this.lifeCulture.story.mystery
             : [
                 'These seed records predate Brown’s factories. A Sallas annotation describes cequin sustaining more than breath: a living body may hold an echo after the mind has left. It is a lead, not an explanation.',
                 'The vault’s catalogue records plants exchanged between rival families before the first industrial trials. Someone has struck the original recipients from the ledger. Sallas appears in the surviving margin.',
@@ -5595,7 +5604,7 @@ export class Stichos {
       )
     )
       return false;
-    const civilization = this.world.civilization!;
+    const civilization = this.lifeCulture;
     const context = this.personalContext();
     let text = civilization.story.tension;
     const choices: Dialogue['choices'] = [{ id: 'close', label: 'Continue' }];
@@ -5651,7 +5660,7 @@ export class Stichos {
     return true;
   }
   private talkUniverse(npc: Npc) {
-    const civilization = this.world.civilization!;
+    const civilization = this.lifeCulture;
     const context = this.personalContext();
     const relationship = context?.plan.relationships.find((r) => r.npcId === npc.id);
     if (npc.role === 'merchant') this.merchant(npc);
@@ -5965,7 +5974,7 @@ export class Stichos {
           id: `${siteId}:survey`,
           title: this.universeLife ? 'An archive off the public chart' : 'Beneath the frost',
           description: this.universeLife
-            ? `An abandoned ${this.world.civilization!.lexicon.archive} holds records outside the public ledger. Its chambers are occupied by raiders.`
+            ? `An abandoned ${this.lifeCulture.lexicon.archive} holds records outside the public ledger. Its chambers are occupied by raiders.`
             : 'An abandoned seed vault preserves a botanical archive. Its chambers are occupied by raiders.',
           stage: complete ? 1 : 0,
           complete,
@@ -7108,7 +7117,7 @@ export class Stichos {
       this.player.phase = 0;
       this.entry(
         'Another person’s breath',
-        `${this.universeLife ? this.player.name + '’s awareness' : 'Theo’s mind'} entered ${target.name}, a living ${this.universeLife ? this.world.civilization!.roleNames[target.role] : target.role}, at (${target.x.toFixed(1)}, ${target.y.toFixed(1)}). ${previous.name}’s body and belongings remained at (${previousPosition.x.toFixed(1)}, ${previousPosition.y.toFixed(1)}). This host carries their own pack, coins and equipment. ${this.universeLife ? 'The traveler’s' : 'Theo’s'} memories and unfinished promises remain.`,
+        `${this.universeLife ? this.player.name + '’s awareness' : 'Theo’s mind'} entered ${target.name}, a living ${this.universeLife ? this.lifeCulture.roleNames[target.role] : target.role}, at (${target.x.toFixed(1)}, ${target.y.toFixed(1)}). ${previous.name}’s body and belongings remained at (${previousPosition.x.toFixed(1)}, ${previousPosition.y.toFixed(1)}). This host carries their own pack, coins and equipment. ${this.universeLife ? 'The traveler’s' : 'Theo’s'} memories and unfinished promises remain.`,
       );
     } else {
       // Without an answering mind, the clinic revives the current body at its rest anchor.

@@ -169,7 +169,12 @@ test('accepting a life supplies its actual profession, home and arrival once whi
   assert.equal(g.player.coins, c.coins);
   assert.deepEqual(g.progression.xp, c.professionXp);
   assert.equal(g.estate.residence?.buildingId, c.home.buildingId);
-  assert.deepEqual(g.estate.staffIds, []);
+  assert.deepEqual(
+    g.estate.staffIds,
+    g.personalStory!.relationships.map((relationship) => relationship.npcId),
+    'A created resident keeps their own actual contacts rather than Theo’s staff.',
+  );
+  assert.ok(g.estate.staffIds.every((id) => !legacy.estate.staffIds.includes(id)));
   assert.ok(g.effects.some((e) => e.kind === 'mind' && e.actorId === c.id && e.duration >= 2));
   assert.equal(
     g.npcs.some((n) => n.id === c.id),

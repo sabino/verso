@@ -1,7 +1,7 @@
-import { JOURNAL_ENTRIES, PLANT_NOTES, GLOSSARY } from './lore';
-import { plantGenome, plantProfile } from './botany';
-import type { PlantKind } from './botany';
-import type { Stichos } from './session';
+import { JOURNAL_ENTRIES, PLANT_NOTES, GLOSSARY } from './lore.ts';
+import { plantGenome, plantProfile } from './botany.ts';
+import type { PlantKind } from './botany.ts';
+import type { Stichos } from './session.ts';
 
 export type NotebookSection = 'years' | 'botany' | 'glossary' | 'threads';
 export interface NotebookView {
@@ -91,7 +91,7 @@ export function notebookLeafCount(game: Stichos, section: NotebookSection) {
 }
 function personalNotebook(game: Stichos, view: NotebookView) {
   const story = game.personalStory,
-    culture = game.world.civilization!;
+    culture = game.lifeCulture;
   const owner = game.player.bodyName,
     title = story?.title ?? 'A life in progress';
   if (!view.open)

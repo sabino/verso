@@ -2133,10 +2133,11 @@ function updateUI() {
     : 'Unclaimed wilderness';
   el('s-coordinates').textContent =
     `${Math.round(p.x)}, ${Math.round(p.y)} · ${currentPlanet.name}${game.universeLife ? '' : ', 3886'}`;
+  const generatedClimate = game.world.generation === 4;
   const romer = (tile.temperature * 21) / 40 + 7.5;
   el('s-weather').textContent =
-    `${game.worldTime.label} · ${game.universeLife ? '' : romer.toFixed(1) + '° Rø · '}${tile.temperature.toFixed(0)}° C · ${game.universeLife ? game.exposure.label : p.cequinTime > 0 ? 'Breath sustained' : 'Freezing air'}`;
-  el('s-weather').title = game.universeLife
+    `${game.worldTime.label} · ${generatedClimate ? '' : romer.toFixed(1) + '° Rø · '}${tile.temperature.toFixed(0)}° C · ${generatedClimate ? game.exposure.label : p.cequinTime > 0 ? 'Breath sustained' : 'Freezing air'}`;
+  el('s-weather').title = generatedClimate
     ? game.exposure.detail
     : 'Cequin protects breathing in the cold.';
   const q = trackedQuest();
