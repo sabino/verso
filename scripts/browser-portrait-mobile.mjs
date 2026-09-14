@@ -8,8 +8,9 @@ export async function verifyPortraitMobile({ endpoint, url, out }) {
   const evidence = { checks: [], screenshots: [], errors: [] };
   const record = (label, detail) => evidence.checks.push({ label, detail });
   const shot = async (page, label) => evidence.screenshots.push(await page.shot(label));
+  let page;
   try {
-    const page = await harness.page('portrait', url, { width: 390, height: 844, mobile: true });
+    page = await harness.page('portrait', url, { width: 390, height: 844, mobile: true });
     await shot(page, 'title');
     await chooseLife(page, 'Portrait input QA', '8', true);
     await page.wait(
@@ -37,6 +38,7 @@ export async function verifyPortraitMobile({ endpoint, url, out }) {
             reachable:e.contains(document.elementFromPoint(r.x+r.width/2,r.y+r.height/2))
           }})};
       })()`);
+      evidence.lastLayout = { width, height, ...layout };
       assert.equal(
         layout.requiredVisible,
         true,
@@ -212,6 +214,18 @@ export async function verifyPortraitMobile({ endpoint, url, out }) {
     evidence.errors = harness.errors;
     assert.deepEqual(evidence.errors, []);
     return evidence;
+  } catch (error) {
+    evidence.failure = String(error);
+    if (page) {
+      evidence.failureState = await page.state().catch(() => null);
+      evidence.failureLayout = await page
+        .read(
+          "({root:document.querySelector('#app').className,controls:document.querySelector('.v-portrait-controls')?.className,visibility:document.visibilityState,focus:document.activeElement?.id})",
+        )
+        .catch(() => null);
+      await shot(page, 'failure').catch(() => {});
+    }
+    throw error;
   } finally {
     evidence.errors = harness.errors;
     fs.writeFileSync(`${out}/evidence.json`, JSON.stringify(evidence, null, 2));

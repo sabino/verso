@@ -2,6 +2,77 @@
 import fs from 'node:fs';
 import path from 'node:path';
 export const delay = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+
+/** Serialized into the page after focus; readiness comes from frames, not a fixed sleep. */
+export async function measureStableClickTarget(selector) {
+  const deadline = performance.now() + 3000;
+  let previous,
+    stableFrames = 0;
+  while (performance.now() < deadline) {
+    await new Promise((resolve, reject) => {
+      const timer = setTimeout(
+        () => {
+          cancelAnimationFrame(frame);
+          reject(Error('Click target layout did not settle: ' + selector));
+        },
+        Math.max(1, deadline - performance.now()),
+      );
+      const frame = requestAnimationFrame(() => {
+        clearTimeout(timer);
+        resolve();
+      });
+    });
+    if (performance.now() >= deadline) break;
+    const element = document.querySelector(selector);
+    if (!element || element.disabled) throw Error('Missing/disabled: ' + selector);
+    const rect = element.getBoundingClientRect();
+    let top = 0,
+      bottom = innerHeight,
+      scroller = null;
+    for (let parent = element.parentElement; parent; parent = parent.parentElement) {
+      const style = getComputedStyle(parent),
+        bounds = parent.getBoundingClientRect();
+      if (/auto|scroll|hidden/.test(style.overflowY)) {
+        top = Math.max(top, bounds.top);
+        bottom = Math.min(bottom, bounds.bottom);
+        if (
+          /auto|scroll/.test(style.overflowY) &&
+          parent.scrollHeight > parent.clientHeight + 1 &&
+          !scroller
+        )
+          scroller = { x: bounds.x + bounds.width / 2, y: bounds.y + bounds.height / 2 };
+      }
+    }
+    const geometry = JSON.stringify([
+      rect.x,
+      rect.y,
+      rect.width,
+      rect.height,
+      top,
+      bottom,
+      innerWidth,
+      innerHeight,
+      scroller,
+    ]);
+    stableFrames = geometry === previous ? stableFrames + 1 : 1;
+    previous = geometry;
+    if (stableFrames < 2) continue;
+    const x = rect.x + rect.width / 2,
+      y = (Math.max(rect.top, top) + Math.min(rect.bottom, bottom)) / 2;
+    if (
+      rect.bottom <= top ||
+      rect.top >= bottom ||
+      !element.contains(document.elementFromPoint(x, y))
+    )
+      return {
+        scroll: scroller ?? { x: innerWidth / 2, y: innerHeight / 2 },
+        delta: Math.max(-450, Math.min(450, (rect.top + rect.bottom) / 2 - (top + bottom) / 2)),
+      };
+    return { x, y };
+  }
+  throw Error('Click target layout did not settle: ' + selector);
+}
+
 export async function connect(address, events = () => {}) {
   const socket = new WebSocket(address);
   await new Promise((resolve, reject) => {
@@ -112,8 +183,7 @@ export async function browserHarness(endpoint, out) {
       });
       await delay(60);
     }
-    async function point(x, y) {
-      await focus();
+    async function dispatchPoint(x, y) {
       if (mobile) {
         await cdp.send('Input.dispatchTouchEvent', { type: 'touchStart', touchPoints: [{ x, y }] });
         await cdp.send('Input.dispatchTouchEvent', { type: 'touchEnd', touchPoints: [] });
@@ -135,13 +205,19 @@ export async function browserHarness(endpoint, out) {
       }
       await delay(100);
     }
+    async function point(x, y) {
+      await focus();
+      return dispatchPoint(x, y);
+    }
     async function click(selector) {
       for (let attempt = 0; attempt < 16; attempt++) {
-        const rect = await read(
-          `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e||e.disabled)throw Error('Missing/disabled: '+${JSON.stringify(selector)});const r=e.getBoundingClientRect();let top=0,bottom=innerHeight,scroller=null;for(let p=e.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();if(/auto|scroll|hidden/.test(s.overflowY)){top=Math.max(top,b.top);bottom=Math.min(bottom,b.bottom);if(/auto|scroll/.test(s.overflowY)&&p.scrollHeight>p.clientHeight+1&&!scroller)scroller={x:b.x+b.width/2,y:b.y+b.height/2};}}const x=r.x+r.width/2,y=(Math.max(r.top,top)+Math.min(r.bottom,bottom))/2;if(r.bottom<=top||r.top>=bottom||!e.contains(document.elementFromPoint(x,y)))return{scroll:scroller??{x:innerWidth/2,y:innerHeight/2},delta:Math.max(-450,Math.min(450,(r.top+r.bottom)/2-(top+bottom)/2))};return{x,y};})()`,
-        );
-        if (!rect.scroll) return point(rect.x, rect.y);
+        // Focusing can resize the viewport or dismiss input UI. Measure only after
+        // that transition, then keep focus unchanged until trusted pointer input.
         await focus();
+        const rect = await read(
+          `(${measureStableClickTarget.toString()})(${JSON.stringify(selector)})`,
+        );
+        if (!rect.scroll) return dispatchPoint(rect.x, rect.y);
         await cdp.send('Input.dispatchMouseEvent', {
           type: 'mouseWheel',
           ...rect.scroll,
@@ -169,13 +245,16 @@ export async function browserHarness(endpoint, out) {
       return file;
     }
     async function resize(width, height) {
+      await focus();
       await cdp.send('Emulation.setDeviceMetricsOverride', {
         width,
         height,
         mobile,
         deviceScaleFactor: 1,
       });
-      await delay(200);
+      await read(
+        `new Promise((resolve,reject)=>{const timer=setTimeout(()=>reject(Error('Viewport did not render after resize')),3000);requestAnimationFrame(()=>requestAnimationFrame(()=>{clearTimeout(timer);resolve(true)}))})`,
+      );
     }
     const client = {
       name,
