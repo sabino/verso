@@ -147,6 +147,20 @@ export async function verifyFirstLife({ endpoint, url, out }) {
       screenshots,
       errors: harness.errors,
     };
+    const mobile = await harness.page('first-life-mobile', url, {
+      width: 390,
+      height: 844,
+      mobile: true,
+    });
+    await fixedCandidate(mobile);
+    await chooseLife(mobile, 'Cushur Puhi', '8', true);
+    await mobile.wait(
+      "document.querySelector('#s-mobile-thread-stage')?.textContent === 'Hear the people involved'",
+    );
+    assert.equal((await mobile.state()).lifeOrigin.index, 3);
+    result.screenshots.push(await mobile.shot('arrival'));
+    await mobile.click('#s-mobile-thread');
+    await mobile.wait("window.stichos.state.modal==='journal'");
     assert.deepEqual(harness.errors, []);
     fs.writeFileSync(path.join(out, 'first-life-results.json'), JSON.stringify(result, null, 2));
     return result;

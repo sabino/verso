@@ -77,7 +77,7 @@ void registerOffline();
 const root = document.getElementById('app')!;
 root.innerHTML = `<main class="s-shell">
  <header class="s-header"><a class="s-brand" href="?">VERSO<span>One universe, many lives</span></a><div class="s-location"><strong id="s-place">Vespera</strong><span id="s-coordinates">Stíchos · 3886</span></div><nav><button id="s-sound" title="Sound and app settings" aria-label="Sound and app settings">♫</button><button id="s-together" title="Play together">Together</button><button id="s-life" title="Professions, homes and clothing (L)">Life</button><button id="s-journal" title="Journal (J)">Journal <kbd>J</kbd></button><button id="s-pause" aria-label="Pause">Ⅱ</button></nav></header>
- <section class="s-world-wrap"><canvas id="s-world" tabindex="0" aria-label="An open world in the Verso universe. WASD or click to walk. E to interact."></canvas><div class="s-weather"><i></i><span id="s-weather">A cold morning</span></div><div class="s-mobile-status"><span>♥ <b id="s-mobile-hp"></b><i><em id="s-mobile-hp-bar"></em></i></span><span>Breath <b id="s-mobile-breath"></b><i><em id="s-mobile-breath-bar"></em></i></span></div><div class="s-compass">N<span>◇</span></div><div id="s-hover" class="s-hover" hidden></div><button id="s-context" class="s-context" hidden></button><div id="s-toast" class="s-toast" role="status" aria-live="polite"></div><div class="s-world-caption">Every road leads to another life.</div></section>
+ <section class="s-world-wrap"><canvas id="s-world" tabindex="0" aria-label="An open world in the Verso universe. WASD or click to walk. E to interact."></canvas><div class="s-weather"><i></i><span id="s-weather">A cold morning</span></div><div class="s-mobile-status"><span>♥ <b id="s-mobile-hp"></b><i><em id="s-mobile-hp-bar"></em></i></span><span>Breath <b id="s-mobile-breath"></b><i><em id="s-mobile-breath-bar"></em></i></span></div><button id="s-mobile-thread" aria-label="Open the current thread in the journal"><small id="s-mobile-thread-stage"></small><span id="s-mobile-thread-title"></span></button><div class="s-compass">N<span>◇</span></div><div id="s-hover" class="s-hover" hidden></div><button id="s-context" class="s-context" hidden></button><div id="s-toast" class="s-toast" role="status" aria-live="polite"></div><div class="s-world-caption">Every road leads to another life.</div></section>
  <aside class="s-sidebar"><section class="s-person"><div class="s-person-heading"><canvas id="s-portrait" width="96" height="112" aria-label="Your current human host"></canvas><div><small id="s-body-label">A borrowed life</small><h1 id="s-person-name">Theo Bishop</h1></div><strong id="s-level">1</strong></div><div class="s-meter health"><label>Vitality <b id="s-hp-label"></b></label><div><i id="s-hp"></i></div></div><div class="s-meter breath"><label>Breath <b id="s-breath-label"></b></label><div><i id="s-breath"></i></div></div><div class="s-person-minor"><span id="s-warmth"></span><span id="s-stamina"></span></div><div class="s-xp"><i id="s-xp"></i></div></section>
  <section class="s-map-block"><canvas id="s-map" width="240" height="150" aria-label="Map around your current position"></canvas><div><span id="s-map-label">Vespera</span><button id="s-expand-map" aria-label="Open world atlas" title="Map (M)">⤢</button></div></section>
  <section class="s-task"><small id="s-quest-stage">Following a thread</small><h2 id="s-quest-title"></h2><p id="s-quest-objective"></p><span id="s-quest-distance"></span><button id="s-track">Read journal</button></section>
@@ -2177,6 +2177,12 @@ function updateUI() {
     el('s-quest-title').textContent = 'The buried works';
     el('s-quest-objective').textContent = floor.objective;
   }
+  el('s-mobile-thread-stage').textContent = el('s-quest-stage').textContent;
+  el('s-mobile-thread-title').textContent = el('s-quest-title').textContent;
+  el('s-mobile-thread').setAttribute(
+    'aria-label',
+    `${el('s-quest-stage').textContent}: ${el('s-quest-title').textContent}. Open journal.`,
+  );
   const target = game.underworldFrame ? undefined : q?.target;
   if (target) {
     const dx = target.x - p.x,
@@ -3727,8 +3733,10 @@ el('s-pocketbook').onclick = () => {
   notebookView.open = false;
   journal();
 };
-el('s-track').onclick = () =>
+const openTrackedThread = () =>
   trackedExpedition ? expeditionMenu(trackedExpedition) : journal('threads');
+el('s-track').onclick = openTrackedThread;
+el('s-mobile-thread').onclick = openTrackedThread;
 el('s-expand-map').onclick = mapModal;
 el('s-help').onclick = controls;
 el('s-inspect-gear').onclick = equipmentMenu;
