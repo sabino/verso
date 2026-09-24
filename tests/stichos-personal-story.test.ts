@@ -145,7 +145,7 @@ test('first life asks for two actual conversations before committing, then conne
   game = stand(game, plan.debt.recipient.target);
   game.interact(plan.debt.recipient.npcId);
   assert.equal(game.dialogue!.choices.find((c) => c.id === 'personal:trust')!.disabled, true);
-  assert.match(personalThread(game.personalStory!, game.inventory).objective, /Speak with/);
+  assert.match(personalThread(game.personalStory!, game.inventory).objective, /Talk to/);
   const witness = plan.relationships.find((r) => r.stance === 'witness')!;
   game = stand(game, witness.target);
   game.interact(witness.npcId);

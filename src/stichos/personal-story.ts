@@ -398,14 +398,15 @@ export function personalThread(
       ].find((person) => person && !person.heard)!;
       return {
         title: story.case.title,
-        objective: `Speak with ${next.name}, the ${next.role}. Hear two accounts before choosing whom to trust. Click a person to approach; E to talk.`,
+        objective: `Talk to ${next.name}. Hear another account before choosing. Click to approach · E to talk.`,
         target: next.target,
         stage: 'Hear the people involved',
       };
     }
     return {
       title: story.case.title,
-      objective: `You have heard ${heard.map((person) => person.name).join(' and ')}. Speak with one of them and choose whose account to back. Their faction will remember.`,
+      objective:
+        'Speak with either person again and choose an account to back. Their faction will remember.',
       target: heard[0].target,
       stage: 'Make a choice',
     };
@@ -415,7 +416,7 @@ export function personalThread(
     const have = inventory[debt.item] ?? 0;
     return {
       title: debt.title,
-      objective: `${have}/${debt.required} ${debt.itemName}. ${have >= debt.required ? 'Return to' : 'Gather or buy supplies, then speak with'} ${debt.recipient.name} to keep this body's promise.`,
+      objective: `${have}/${debt.required} ${debt.itemName}. ${have >= debt.required ? 'Deliver to' : 'Gather or buy more, then deliver to'} ${debt.recipient.name}.`,
       target: debt.recipient.target,
       stage: 'Keep a promise',
     };
@@ -426,8 +427,8 @@ export function personalThread(
       title: contract?.status === 'active' ? contract.title : work.title,
       objective:
         contract?.status === 'active'
-          ? `${contract.progress}/${contract.required} completed. Do the work and report to the issuing board for pay and standing.`
-          : `${work.progress}/${work.goal} local commissions claimed. Read the nearby noticeboard to choose real work.`,
+          ? `${contract.progress}/${contract.required} done. Work, then report to the board for pay and standing.`
+          : `${work.progress}/${work.goal} commissions claimed. Read the nearby noticeboard to choose work.`,
       target: contract?.status === 'active' ? contract.target : work.target,
       stage: 'Earn local standing',
     };
@@ -435,14 +436,14 @@ export function personalThread(
   if (!story.complete)
     return {
       title: story.obligations[3].title,
-      objective: story.obligations[3].description,
+      objective: `Craft a lens, then bring it with two ore and one timber to ${story.signal.name}.`,
       target: story.signal,
       stage: 'Leave an independent record',
     };
   return {
     title: 'Another life is possible',
     objective:
-      'The account is safe. Continue this work, or visit a quiet memorial to enter a willing person. Knowledge follows you; possessions stay with each body.',
+      'Continue this work, or enter a willing person at a quiet memorial. Knowledge travels; possessions stay.',
     target: undefined,
     stage: 'Your next life',
   };

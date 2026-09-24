@@ -97,6 +97,7 @@ export class StichosRenderer {
   private combatFeedback = new CombatFeedback();
   private cameraImpulse: Point = { x: 0, y: 0 };
   private canopySubjects: (Point & { worldY: number })[] = [];
+  private nameplateBounds: { left: number; right: number; top: number; bottom: number }[] = [];
   get feedbackDiagnostics() {
     return this.combatFeedback.diagnostics;
   }
@@ -306,6 +307,8 @@ export class StichosRenderer {
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = '#b8cada';
     ctx.fillRect(0, 0, this.width, this.height);
+    // NPCs are depth sorted, so reserve the player's name before any of them draw.
+    this.nameplateBounds = [this.nameplate(game.player).bounds];
     const underground = game.underworldFrame;
     if (underground) {
       // Match the surface camera's portrait framing, including its low player anchor.
@@ -1455,6 +1458,27 @@ export class StichosRenderer {
     ctx.fillStyle = '#abe2dc';
     ctx.fillText(label, p.x, y);
   }
+  private nameplate(person: Npc | Stichos['player']) {
+    const p = this.worldToScreen(person);
+    const s = (this.unit / 32) * 1.35;
+    const label = person.name.split(' ')[0];
+    const previousFont = this.ctx.font;
+    this.ctx.font = `${Math.max(10, Math.round(10 * Math.sqrt(this.viewZoom)))}px "Courier New",monospace`;
+    const width = Math.ceil(this.ctx.measureText(label).width + 8);
+    this.ctx.font = previousFont;
+    const y = p.y - 44 * s * person.appearance.height;
+    return {
+      label,
+      y,
+      width,
+      bounds: {
+        left: p.x - width / 2,
+        right: p.x + width / 2,
+        top: y - 11,
+        bottom: y + 6,
+      },
+    };
+  }
   private person(game: Stichos, person: Npc | Stichos['player'], player: boolean) {
     const p = this.worldToScreen(person),
       s = (this.unit / 32) * 1.35,
@@ -1544,30 +1568,36 @@ export class StichosRenderer {
     ctx.restore();
     const near = Math.hypot(person.x - game.player.x, person.y - game.player.y) < 4;
     if (player || near || (person as Npc).hostile) {
-      const label = person.name.split(' ')[0];
+      const plate = this.nameplate(person);
       ctx.font = `${Math.max(10, Math.round(10 * Math.sqrt(this.viewZoom)))}px "Courier New",monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      const labelY = p.y - 44 * s * person.appearance.height;
-      ctx.fillStyle = '#172e40bb';
-      ctx.fillRect(
-        Math.round(p.x - ctx.measureText(label).width / 2 - 4),
-        Math.round(labelY - 11),
-        Math.ceil(ctx.measureText(label).width + 8),
-        13,
-      );
-      ctx.fillStyle = player ? '#f0e7c9' : (person as Npc).hostile ? '#efb9a9' : '#d8e1d8';
-      ctx.fillText(label, Math.round(p.x), Math.round(labelY));
-      if (person.hp < person.maxHp || player) {
-        rect(ctx, p.x - 11 * s, labelY + 3, 22 * s, 3, '#253746');
-        rect(
-          ctx,
-          p.x - 10 * s,
-          labelY + 4,
-          (20 * s * person.hp) / person.maxHp,
-          1,
-          player ? '#b86f65' : '#a2c0a3',
+      const clear =
+        player ||
+        !this.nameplateBounds.some(
+          (other) =>
+            plate.bounds.left < other.right + 3 &&
+            plate.bounds.right > other.left - 3 &&
+            plate.bounds.top < other.bottom + 3 &&
+            plate.bounds.bottom > other.top - 3,
         );
+      if (clear) {
+        if (!player) this.nameplateBounds.push(plate.bounds);
+        ctx.fillStyle = '#172e40bb';
+        ctx.fillRect(Math.round(plate.bounds.left), Math.round(plate.y - 11), plate.width, 13);
+        ctx.fillStyle = player ? '#f0e7c9' : (person as Npc).hostile ? '#efb9a9' : '#d8e1d8';
+        ctx.fillText(plate.label, Math.round(p.x), Math.round(plate.y));
+        if (person.hp < person.maxHp || player) {
+          rect(ctx, p.x - 11 * s, plate.y + 3, 22 * s, 3, '#253746');
+          rect(
+            ctx,
+            p.x - 10 * s,
+            plate.y + 4,
+            (20 * s * person.hp) / person.maxHp,
+            1,
+            player ? '#b86f65' : '#a2c0a3',
+          );
+        }
       }
     }
     const breath = this.reducedMotion
@@ -2871,7 +2901,10 @@ export class StichosRenderer {
       }
     } else if (effect.kind === 'harvest') {
       const craft = this.effectActors.get(effect.id)?.kind === 'craft';
-      const count = this.reducedMotion ? 3 : 7;
+      // A tool stroke has one visible material contact, timed with its physical sound.
+      const contact = effect.tool ? clamp((t - 0.36) / 0.12, 0, 1) : 1;
+      ctx.globalAlpha *= contact;
+      const count = effect.tool ? (this.reducedMotion ? 2 : 5) : this.reducedMotion ? 3 : 7;
       for (let i = 0; i < count; i++) {
         const a = i * 2.399 + (effect.id % 7),
           reach = (craft ? 6 : 4) + motionT * (craft ? 12 : 15),
@@ -2882,7 +2915,31 @@ export class StichosRenderer {
               motionT * 13 +
               motionT * motionT * 10) *
             s;
-        if (craft) {
+        if (effect.tool?.kind === 'pickaxe') {
+          // Stone breaks into cool angular chips and short, heavy dust below the blow.
+          poly(
+            ctx,
+            [
+              [x, y],
+              [x + 3 * s, y - 2 * s],
+              [x + 2 * s, y + 2 * s],
+            ],
+            i % 2 ? '#b7b6ad' : '#788d93',
+          );
+          rect(ctx, x - s, y + 3 * s, 2 * s, s, '#aba89a');
+        } else if (effect.tool?.kind === 'axe') {
+          // Split timber carries long ochre splinters in the direction of the strike.
+          line(
+            ctx,
+            x - 2 * s,
+            y + 3 * s,
+            x + (i % 2 ? 4 : 2) * s,
+            y - 2 * s,
+            i % 2 ? '#d3ac73' : '#8f6748',
+            s,
+          );
+          rect(ctx, x, y, 2 * s, s, '#ead1a0');
+        } else if (craft) {
           rect(ctx, x, y, s, 3 * s, i % 2 ? '#d8d8a5' : '#b4cbb5');
           rect(ctx, x - s, y + s, 3 * s, s, '#e2dbb4');
         } else {

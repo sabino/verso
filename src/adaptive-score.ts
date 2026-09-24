@@ -186,6 +186,20 @@ export function composePhrase(
           ? 'flute'
           : palette.lead;
   const weight = context.reputation === 'wanted' || context.reputation === 'feared' ? 0.75 : 1;
+  // One phrase of open air gives weather, footsteps and the player's own work room to speak.
+  // Danger interrupts it; settlement music does not disappear mid-conversation.
+  if (quietPhrase)
+    return {
+      identity,
+      zone,
+      seed: keySeed >>> 0,
+      index,
+      bpm,
+      beats: 32,
+      root,
+      harmony: palette.chords,
+      notes,
+    };
   for (let bar = 0; bar < 8; bar++) {
     const chord = palette.chords[bar];
     if (sparse && bar % 2 === 1 && threat < 0.35 && bar < 6) continue;
@@ -202,7 +216,11 @@ export function composePhrase(
       );
     }
     add(bar * 4, sparse ? 3.5 : 2.6, chord, 'bass', 0.047, 'bass', 0, -12);
-    if (!sparse || threat > 0.35 || (context.production ?? 0) > 0) {
+    if (
+      (zone !== 'home' && zone !== 'temple' && !sparse) ||
+      threat > 0.35 ||
+      (context.production ?? 0) > 0
+    ) {
       add(bar * 4, 0.35, 0, 'drum', threat > 0.55 ? 0.055 : 0.024, 'rhythm', -0.12, -12);
       if (zone === 'tavern' || threat > 0.55 || zone === 'workshop')
         add(bar * 4 + 2, 0.22, 4, 'brush', 0.018 + threat * 0.015, 'rhythm', 0.22);

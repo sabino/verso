@@ -5551,7 +5551,7 @@ export class Stichos {
         this.bodyId,
         prop.seed + stroke.work.strokes,
         0.85,
-        0.17,
+        0.3,
       ),
     );
     if (!stroke.complete) {
@@ -5798,7 +5798,12 @@ export class Stichos {
       return;
     }
     this.talkBase(npc);
-    if (this.dialogue?.npcId === npc.id && reaction) this.dialogue.text += `\n${reaction.summary}`;
+    if (
+      this.dialogue?.npcId === npc.id &&
+      reaction &&
+      reaction.summary !== 'No credible local history yet.'
+    )
+      this.dialogue.text += `\n${reaction.summary}`;
     if (!this.dialogue || this.dialogue.npcId !== npc.id) return;
     this.society.converse(npc);
     this.dialogue.choices.push(

@@ -26,8 +26,21 @@ jobs:
       - run: npm test
       - run: npm run format:check
       - run: npm run build
+      - name: Check out base for matching browser screenshot
+        if: github.event_name == 'pull_request'
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: .dream-loop/baseline
+          persist-credentials: false
+      - name: Build base for comparison
+        if: github.event_name == 'pull_request'
+        working-directory: .dream-loop/baseline
+        run: npm ci && npm run build
       - name: Native portrait browser check
         run: node scripts/ci-browser.mjs
+        env:
+          VERSO_BASELINE_DIST: ${{ github.event_name == 'pull_request' && '.dream-loop/baseline/dist' || '' }}
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

@@ -32,6 +32,12 @@ summary:focus-visible {
   flex: 1;
   min-width: 0;
 }
+.solo #v-voice-mount {
+  display: none;
+}
+.solo .v-comms-dock {
+  justify-content: flex-end;
+}
 .v-comms-dock .v-voice {
   padding: 0;
   border: 0;

@@ -87,6 +87,11 @@ root.innerHTML = `<main class="s-shell">
  <div class="s-mobile-move"><button data-move="w" aria-label="Move north">↑</button><button data-move="a" aria-label="Move west">←</button><button data-move="s" aria-label="Move south">↓</button><button data-move="d" aria-label="Move east">→</button><button data-move="shift" aria-label="Hold to run while moving">Run</button></div>
  <div id="s-dialogue" class="s-dialogue" hidden></div><div id="s-modal" class="s-modal" hidden></div><div id="s-transfer" class="s-transfer" role="dialog" aria-modal="true" aria-labelledby="s-transfer-line" hidden><div class="s-transfer-ring"></div><span id="s-transfer-time"></span><h2 id="s-transfer-line"></h2><p id="s-transfer-sub"></p><div id="s-intro-controls" class="s-intro-controls" hidden><button id="s-intro-prev">← Back</button><span id="s-intro-page" aria-live="polite"></span><button id="s-intro-next">Continue →</button></div><button id="s-skip">Continue</button></div></main>`;
 
+// Put the body's present concern directly below its identity; the map is supporting context.
+const sidebar = root.querySelector('.s-sidebar')!;
+sidebar.insertBefore(sidebar.querySelector('.s-task')!, sidebar.querySelector('.s-map-block'));
+root.classList.add('solo');
+
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const esc = (text: unknown) =>
   String(text).replace(
@@ -2986,6 +2991,7 @@ multiplayer.onSystemsCorrection = (point, reason) => {
 };
 multiplayer.onLiving = (frame) => game.applyLivingWorldFrame(frame);
 multiplayer.onChange = () => {
+  root.classList.toggle('solo', multiplayer.status === 'offline');
   if (multiplayer.status !== 'online') game.clearLivingWorldAuthority();
   voiceUi.update();
   if (multiplayer.status === 'online') roomError = '';
