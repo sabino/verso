@@ -1508,11 +1508,14 @@ export class Stichos {
         repaid: false,
         trusted: null,
         aligned: false,
+        heard: [],
       };
       this.personalStories.records.push(record);
     }
     if (record.trusted && !plan.relationships.some((r) => r.npcId === record.trusted))
       throw new Error('A personal history names an unrelated witness.');
+    if (record.heard?.some((id) => !plan!.relationships.some((r) => r.npcId === id)))
+      throw new Error('A personal history heard an unrelated resident.');
     if (
       record.aligned &&
       this.freeLifeState.completed - record.baselineCommissions < plan.commissionGoal
@@ -5676,6 +5679,10 @@ export class Stichos {
       };
     this.dialogue!.role = civilization.roleNames[npc.role];
     if (relationship && context) {
+      // Merchant stock should not replace the resident's part in this body's case.
+      this.dialogue!.text = relationship.reason;
+      context.record.heard ??= [];
+      if (!context.record.heard.includes(npc.id)) context.record.heard.push(npc.id);
       this.dialogue!.choices.unshift({
         id: 'personal:past',
         label: 'Ask about this life before the arrival',
@@ -5684,7 +5691,11 @@ export class Stichos {
         this.dialogue!.choices.unshift({
           id: 'personal:trust',
           label: `Trust ${npc.name}'s account`,
-          detail: `A lasting choice; ${this.world.clans[npc.clan].name} gains your confidence.`,
+          disabled: context.record.heard.length < 2,
+          detail:
+            context.record.heard.length < 2
+              ? 'Hear another person named in this case before committing.'
+              : `A lasting choice; ${this.world.clans[npc.clan].name} gains your confidence.`,
         });
       if (npc.id === context.plan.debt.recipient.npcId && !context.record.repaid)
         this.dialogue!.choices.unshift({
@@ -5714,7 +5725,13 @@ export class Stichos {
       this.reply(`${relationship.reason} ${plan.mystery}`);
       return;
     }
-    if (choiceId === 'personal:trust' && npc && relationship && !record.trusted) {
+    if (
+      choiceId === 'personal:trust' &&
+      npc &&
+      relationship &&
+      !record.trusted &&
+      (record.heard?.length ?? 0) >= 2
+    ) {
       record.trusted = npc.id;
       this.estateTrust[npc.id] = true;
       this.changeReputation(npc.clan, 6);
@@ -5727,7 +5744,7 @@ export class Stichos {
       );
       this.syncPersonalStory();
       this.reply(
-        'Your confidence is recorded. The chosen faction remembers it; the other accounts still exist.',
+        `${npc.name} will speak for this claim. ${this.world.clans[npc.clan].name} now trusts you more; the rival faction has taken notice. The other accounts still exist.`,
       );
       return;
     }

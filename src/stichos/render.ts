@@ -33,6 +33,7 @@ import {
 import type { CivilBuildingKind, Sprite } from './art.ts';
 import { drawHomeDecoration, homeDecorations } from './progression-art.ts';
 import { effectActor } from './actor-motion.ts';
+import { cameraFrame } from './camera-motion.ts';
 import type { HumanoidAction, HumanoidActionKind } from './actor-motion.ts';
 
 interface Building {
@@ -65,6 +66,7 @@ export class StichosRenderer {
   private ratio = 1;
   private viewZoom = 1;
   private camera: Point = { x: 0, y: 5 };
+  private pixelCamera: Point = { x: 0, y: 5 };
   private art = new StichosArt();
   private roofs = new Map<string, Roof>();
   private buildingBounds = new Map<string, Building>();
@@ -125,14 +127,14 @@ export class StichosRenderer {
   }
   worldToScreen(p: Point): Point {
     return {
-      x: this.width / 2 + (p.x - this.camera.x) * this.unit + this.cameraImpulse.x,
-      y: this.height * 0.58 + (p.y - this.camera.y) * this.unit + this.cameraImpulse.y,
+      x: this.width / 2 + (p.x - this.pixelCamera.x) * this.unit + this.cameraImpulse.x,
+      y: this.height * 0.58 + (p.y - this.pixelCamera.y) * this.unit + this.cameraImpulse.y,
     };
   }
   screenToWorld(p: Point): Point {
     return {
-      x: (p.x - this.width / 2 - this.cameraImpulse.x) / this.unit + this.camera.x,
-      y: (p.y - this.height * 0.58 - this.cameraImpulse.y) / this.unit + this.camera.y,
+      x: (p.x - this.width / 2 - this.cameraImpulse.x) / this.unit + this.pixelCamera.x,
+      y: (p.y - this.height * 0.58 - this.cameraImpulse.y) / this.unit + this.pixelCamera.y,
     };
   }
 
@@ -170,6 +172,7 @@ export class StichosRenderer {
       this.worldSeed = game.world.seed;
       this.worldGeneration = game.world.generation;
       this.camera = { x: game.player.x, y: game.player.y };
+      this.pixelCamera = { ...this.camera };
       this.roofs.clear();
       this.buildingBounds.clear();
       this.chunkBuildings.clear();
@@ -223,14 +226,16 @@ export class StichosRenderer {
         tool: effect.tool,
       });
     }
-    const follow = options.reducedMotion
-      ? 1
-      : this.previousPlayer === null
-        ? 1
-        : 1 - Math.exp(-Math.max(dt, 0.016) * 12);
+    const camera = cameraFrame(
+      this.camera,
+      game.player,
+      dt,
+      unit,
+      !!options.reducedMotion || this.previousPlayer === null,
+    );
     this.playerSite = game.world.tile(game.player.x, game.player.y).site;
-    this.camera.x += (game.player.x - this.camera.x) * follow;
-    this.camera.y += (game.player.y - this.camera.y) * follow;
+    this.camera = camera.position;
+    this.pixelCamera = camera.pixel;
     this.combatFeedback.update(
       game.time,
       game.effects,
@@ -273,9 +278,7 @@ export class StichosRenderer {
       options.combatCues,
     );
     this.cameraImpulse = this.combatFeedback.cameraOffset();
-    // Quantized camera preserves crisp pixel clusters without resampling the art.
-    this.camera.x = Math.round(this.camera.x * unit) / unit;
-    this.camera.y = Math.round(this.camera.y * unit) / unit;
+    // The projected image remains pixel aligned; the follow state keeps subpixel motion.
     // Project once per frame, not once per tree. Only nearby live threats and
     // companions reveal their silhouette through vegetation; walls stay opaque.
     this.canopySubjects = [

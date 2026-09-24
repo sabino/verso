@@ -56,6 +56,7 @@ import { notebookHtml, notebookLeafCount } from './notebook';
 import type { NotebookSection, NotebookView } from './notebook';
 import { INTRO_BEATS, JOURNAL_ENTRIES, PLANT_NOTES } from './lore';
 import { Stichos, ITEMS, RECIPES } from './session';
+import { personalThread } from './personal-story';
 import { StichosRenderer, drawSurfaceMapSigns } from './render';
 import { drawUnderworldMap } from './underworld-map.ts';
 import { drawPortrait } from './portrait';
@@ -79,7 +80,7 @@ root.innerHTML = `<main class="s-shell">
  <section class="s-world-wrap"><canvas id="s-world" tabindex="0" aria-label="An open world in the Verso universe. WASD or click to walk. E to interact."></canvas><div class="s-weather"><i></i><span id="s-weather">A cold morning</span></div><div class="s-mobile-status"><span>♥ <b id="s-mobile-hp"></b><i><em id="s-mobile-hp-bar"></em></i></span><span>Breath <b id="s-mobile-breath"></b><i><em id="s-mobile-breath-bar"></em></i></span></div><div class="s-compass">N<span>◇</span></div><div id="s-hover" class="s-hover" hidden></div><button id="s-context" class="s-context" hidden></button><div id="s-toast" class="s-toast" role="status" aria-live="polite"></div><div class="s-world-caption">Every road leads to another life.</div></section>
  <aside class="s-sidebar"><section class="s-person"><div class="s-person-heading"><canvas id="s-portrait" width="96" height="112" aria-label="Your current human host"></canvas><div><small id="s-body-label">A borrowed life</small><h1 id="s-person-name">Theo Bishop</h1></div><strong id="s-level">1</strong></div><div class="s-meter health"><label>Vitality <b id="s-hp-label"></b></label><div><i id="s-hp"></i></div></div><div class="s-meter breath"><label>Breath <b id="s-breath-label"></b></label><div><i id="s-breath"></i></div></div><div class="s-person-minor"><span id="s-warmth"></span><span id="s-stamina"></span></div><div class="s-xp"><i id="s-xp"></i></div></section>
  <section class="s-map-block"><canvas id="s-map" width="240" height="150" aria-label="Map around your current position"></canvas><div><span id="s-map-label">Vespera</span><button id="s-expand-map" aria-label="Open world atlas" title="Map (M)">⤢</button></div></section>
- <section class="s-task"><small>Following a thread</small><h2 id="s-quest-title"></h2><p id="s-quest-objective"></p><span id="s-quest-distance"></span><button id="s-track">Read journal</button></section>
+ <section class="s-task"><small id="s-quest-stage">Following a thread</small><h2 id="s-quest-title"></h2><p id="s-quest-objective"></p><span id="s-quest-distance"></span><button id="s-track">Read journal</button></section>
  <section class="s-pack"><div class="s-pack-heading"><h2>Your satchel</h2><span id="s-coins"></span><button id="v-pack-close" aria-label="Close satchel">×</button></div><div class="s-tabs" role="tablist" aria-label="Satchel view"><button id="s-tab-pack" role="tab" aria-selected="true">Belongings</button><button id="s-tab-craft" role="tab" aria-selected="false">Prepare</button></div><div id="s-pack-content"></div><button id="s-pocketbook" class="s-pocketbook"><span aria-hidden="true">▤</span><strong id="s-pocketbook-label">The priest’s notebook</strong><small id="s-pocketbook-note">In this body’s keeping</small></button><div id="s-item-detail" class="s-item-detail">Select an item to examine it.</div></section>
  <footer class="s-side-footer"><span id="s-distance">0 paces traveled</span><button id="s-help">Controls</button></footer></aside>
  <footer class="s-actionbar"><div class="s-equipment"><button data-equip="staff" title="Equip staff">${itemIcon('staff')}</button><button data-equip="sword" title="Equip sword">${itemIcon('sword')}</button><button data-equip="bow" title="Equip bow">${itemIcon('bow')}</button><button id="s-inspect-gear" title="Inspect equipment (K)">Gear</button></div><div class="s-hotkeys"><button data-action="attack" title="Attack (F / 1)"><kbd>1</kbd>${itemIcon('sword')}<span>Strike</span></button><button data-action="ward" title="Botanical ward (Q / 2)"><kbd>2</kbd>${itemIcon('ward')}<span>Ward</span><i id="s-ward-cooldown"></i></button><button data-use="cequin" title="Breathe cequin (3)"><kbd>3</kbd>${itemIcon('cequin')}<b data-count="cequin"></b><span>Breathe</span></button><button data-use="salve" title="Apply salve (4)"><kbd>4</kbd>${itemIcon('salve')}<b data-count="salve"></b><span>Heal</span></button><button data-use="tonic" title="Use warming tonic (5)"><kbd>5</kbd>${itemIcon('tonic')}<b data-count="tonic"></b><span>Warm</span></button><button data-use="rations" title="Eat (6)"><kbd>6</kbd>${itemIcon('rations')}<b data-count="rations"></b><span>Eat</span></button><button data-action="interact" title="Interact (E)"><kbd>E</kbd>${itemIcon('hand')}<span>Interact</span></button></div><button id="s-mobile-pack">Satchel</button><button id="v-mobile-more">More</button><span class="s-walk-help">WASD / click to walk<br>Shift to run</span></footer>
@@ -221,6 +222,8 @@ function trackedQuest() {
       complete: false,
       stage: 0,
     };
+  if (game.universeLife && !trackedQuestId && game.personalStory)
+    return personalThread(game.personalStory, game.inventory, game.freeLife.contract);
   const active = game.quests.filter((q) => !q.complete);
   return (
     active.find((q) => q.id === trackedQuestId) ??
@@ -639,7 +642,7 @@ function activate(next: Stichos) {
   multiplayer.disconnect();
   peerEmotes.clear();
   el('v-chat-log').replaceChildren();
-  setChatCollapsed(innerWidth < 900);
+  setChatCollapsed(true);
   game = next;
   game.enableLivingSystems(getBrowserPlayerId());
   travel.cancel('world-change');
@@ -1164,7 +1167,7 @@ function endTransfer() {
     transferKind === 'opening'
       ? 'Cequin helps this body breathe. Speak to the botanist beside the garden.'
       : transferKind === 'arrival'
-        ? `${game.player.name}: a new day begins. Find work, build a home, or share a room with friends.`
+        ? `${game.player.name} wakes in ${game.originName}. ${game.personalStory?.case.title ?? 'A life is already in motion'}. Find the people involved.`
         : 'Your mind settles. This life continues.',
     7000,
   );
@@ -2093,7 +2096,9 @@ function updateUI() {
     drawPortrait(portrait, game.displayAppearance);
   }
   el('s-body-label').textContent =
-    p.name === 'Theo Bishop' ? 'Theo Bishop · a borrowed life' : `${p.name} · a borrowed life`;
+    game.universeLife && game.lifeOrigin
+      ? `${game.lifeCulture.roleNames[game.lifeOrigin.profession]} · ${game.originName}`
+      : 'A borrowed life';
   el('s-level').textContent = String(p.level);
   el('s-hp-label').textContent = `${Math.ceil(p.hp)} / ${p.maxHp}`;
   el('s-breath-label').textContent = `${Math.ceil(p.breath)}%`;
@@ -2141,6 +2146,7 @@ function updateUI() {
     ? game.exposure.detail
     : 'Cequin protects breathing in the cold.';
   const q = trackedQuest();
+  el('s-quest-stage').textContent = typeof q?.stage === 'string' ? q.stage : 'Following a thread';
   el('s-quest-title').textContent = q?.title ?? 'An unfinished life';
   el('s-quest-objective').textContent =
     q?.objective ?? 'Follow the roads. Find the people whose lives touch yours.';
@@ -2987,6 +2993,7 @@ multiplayer.onChange = () => {
   game.setSharedWorld(multiplayer.status !== 'offline');
   if (multiplayer.status === 'offline' && started) game.enableLivingSystems(getBrowserPlayerId());
   game.setSharedCombat(multiplayer.status !== 'offline', `${game.world.seed}:${multiplayer.room}`);
+  if (multiplayer.status === 'online' && innerWidth >= 900) setChatCollapsed(false);
   el('s-together').textContent =
     multiplayer.status === 'online'
       ? `Room · ${multiplayer.peers.length + 1}`
@@ -4251,6 +4258,7 @@ Object.defineProperty(window, 'stichos', {
         campaignObjective: game.campaignObjective,
         endingSummary: game.endingSummary,
         freeLife: game.freeLife,
+        personalStory: game.personalStory,
         knownIdentities: game.knownIdentities,
         progression: game.progression,
         nearbyHomes: game.nearbyHomes,

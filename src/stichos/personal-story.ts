@@ -42,14 +42,16 @@ export interface PersonalStoryRecord {
   repaid: boolean;
   trusted: string | null;
   aligned: boolean;
+  /** People whose account was actually heard, rather than merely seen nearby. */
+  heard?: string[];
 }
 export interface PersonalStoriesState {
   version: 1;
   records: PersonalStoryRecord[];
 }
 export interface PersonalStoryView
-  extends Omit<PersonalStoryPlan, 'relationships' | 'debt' | 'commissionGoal'> {
-  relationships: (PersonalRelationship & { met: boolean; trusted: boolean })[];
+  extends Omit<PersonalStoryPlan, 'relationships' | 'commissionGoal'> {
+  relationships: (PersonalRelationship & { met: boolean; heard: boolean; trusted: boolean })[];
   obligations: {
     id: string;
     title: string;
@@ -322,9 +324,11 @@ export function personalStoryView(
     mystery: plan.mystery,
     purpose: plan.purpose,
     signal: { ...plan.signal },
+    debt: structuredClone(plan.debt),
     relationships: plan.relationships.map((r) => ({
       ...structuredClone(r),
       met: known.includes(r.npcId),
+      heard: (record.heard ?? []).includes(r.npcId),
       trusted: record.trusted === r.npcId,
     })),
     obligations: [
@@ -371,6 +375,78 @@ export function personalStoryView(
     complete: record.aligned,
   };
 }
+
+/** The first session follows this body's unfinished business. No separate quest state is saved. */
+export function personalThread(
+  story: PersonalStoryView,
+  inventory: Partial<Record<ItemId, number>>,
+  contract?: {
+    title: string;
+    progress: number;
+    required: number;
+    target: Point;
+    status: string;
+  } | null,
+) {
+  const heard = story.relationships.filter((person) => person.heard);
+  if (!story.obligations[1].complete) {
+    if (heard.length < 2) {
+      const next = [
+        story.relationships.find((person) => person.stance === 'ally'),
+        story.relationships.find((person) => person.stance === 'witness'),
+        story.relationships.find((person) => person.stance === 'rival'),
+      ].find((person) => person && !person.heard)!;
+      return {
+        title: story.case.title,
+        objective: `Speak with ${next.name}, the ${next.role}. Hear two accounts before choosing whom to trust. Click a person to approach; E to talk.`,
+        target: next.target,
+        stage: 'Hear the people involved',
+      };
+    }
+    return {
+      title: story.case.title,
+      objective: `You have heard ${heard.map((person) => person.name).join(' and ')}. Speak with one of them and choose whose account to back. Their faction will remember.`,
+      target: heard[0].target,
+      stage: 'Make a choice',
+    };
+  }
+  if (!story.obligations[0].complete) {
+    const debt = story.debt;
+    const have = inventory[debt.item] ?? 0;
+    return {
+      title: debt.title,
+      objective: `${have}/${debt.required} ${debt.itemName}. ${have >= debt.required ? 'Return to' : 'Gather or buy supplies, then speak with'} ${debt.recipient.name} to keep this body's promise.`,
+      target: debt.recipient.target,
+      stage: 'Keep a promise',
+    };
+  }
+  if (!story.obligations[2].complete) {
+    const work = story.obligations[2];
+    return {
+      title: contract?.status === 'active' ? contract.title : work.title,
+      objective:
+        contract?.status === 'active'
+          ? `${contract.progress}/${contract.required} completed. Do the work and report to the issuing board for pay and standing.`
+          : `${work.progress}/${work.goal} local commissions claimed. Read the nearby noticeboard to choose real work.`,
+      target: contract?.status === 'active' ? contract.target : work.target,
+      stage: 'Earn local standing',
+    };
+  }
+  if (!story.complete)
+    return {
+      title: story.obligations[3].title,
+      objective: story.obligations[3].description,
+      target: story.signal,
+      stage: 'Leave an independent record',
+    };
+  return {
+    title: 'Another life is possible',
+    objective:
+      'The account is safe. Continue this work, or visit a quiet memorial to enter a willing person. Knowledge follows you; possessions stay with each body.',
+    target: undefined,
+    stage: 'Your next life',
+  };
+}
 export function restorePersonalStories(raw: unknown): PersonalStoriesState {
   if (raw === undefined) return { version: 1, records: [] };
   const fail = (): never => {
@@ -396,8 +472,16 @@ export function restorePersonalStories(raw: unknown): PersonalStoriesState {
       typeof r.repaid !== 'boolean' ||
       typeof r.aligned !== 'boolean' ||
       (r.trusted !== null && !id(r.trusted)) ||
-      (r.aligned && (!r.repaid || !r.trusted))
+      (r.aligned && (!r.repaid || !r.trusted)) ||
+      (r.heard !== undefined &&
+        (!Array.isArray(r.heard) ||
+          r.heard.length > 3 ||
+          new Set(r.heard).size !== r.heard.length ||
+          !r.heard.every(id)))
     )
       return fail();
-  return structuredClone(state);
+  return {
+    version: 1,
+    records: state.records.map((r) => ({ ...structuredClone(r), heard: r.heard ?? [] })),
+  };
 }

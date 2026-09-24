@@ -420,25 +420,26 @@ svg {
   line-height: 15px;
 }
 .s-task {
-  padding: 14px 17px 12px;
+  padding: 17px 17px 15px;
   border-bottom: 1px solid #636d6366;
-  background: #11222b44;
+  border-left: 3px solid #baa16b;
+  background: #192b30;
 }
 .s-task > small {
-  font-size: 9px;
-  letter-spacing: 1px;
-  color: #c6ae7d;
+  font-size: 10px;
+  letter-spacing: 0.5px;
+  color: #d6c58e;
 }
 .s-task h2 {
-  font-size: 16px;
+  font-size: 17px;
   font-weight: normal;
-  margin: 7px 0;
-  color: #eee0c0;
+  margin: 8px 0;
+  color: #f5e8c9;
 }
 .s-task p {
-  font-size: 11px;
-  line-height: 1.55;
-  color: #aabdc0;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #d0d8ce;
   margin: 8px 0;
 }
 .s-task button {

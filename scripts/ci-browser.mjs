@@ -6,6 +6,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { verifyPortraitMobile } from './browser-portrait-mobile.mjs';
+import { verifyFirstLife } from './browser-first-life.mjs';
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A port file can precede HTTP readiness, especially on a cold hosted runner. */
@@ -201,6 +202,7 @@ async function main() {
       url: `http://localhost:${server.address().port}/`,
       out,
     });
+    await verifyFirstLife({ endpoint, url: `http://localhost:${server.address().port}/`, out });
   } finally {
     browser?.kill('SIGTERM');
     if (log !== undefined) fs.closeSync(log);
