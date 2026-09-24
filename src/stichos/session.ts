@@ -5680,7 +5680,7 @@ export class Stichos {
     this.dialogue!.role = civilization.roleNames[npc.role];
     if (relationship && context) {
       // Merchant stock should not replace the resident's part in this body's case.
-      this.dialogue!.text = relationship.reason;
+      this.dialogue!.text = relationship.account;
       context.record.heard ??= [];
       if (!context.record.heard.includes(npc.id)) context.record.heard.push(npc.id);
       this.dialogue!.choices.unshift({

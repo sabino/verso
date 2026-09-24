@@ -12,6 +12,8 @@ export interface PersonalRelationship {
   clan: number;
   stance: 'ally' | 'witness' | 'rival';
   reason: string;
+  /** The resident's own account, distinct from the notebook's third-person history. */
+  account: string;
   target: Point;
 }
 export interface PersonalStoryPlan {
@@ -229,6 +231,12 @@ export function generatePersonalStory(
         : stance === 'witness'
           ? `${person.name}, a ${role}, retained evidence of ${cause}. Their account connects ${life.name} to ${hook.stakes}.`
           : `${person.name} represents ${profile.factions[person.clan].name} in the dispute over ${hook.stakes}. Their faction could ${motive}; their account may also expose something your friends omitted.`;
+    const account =
+      stance === 'ally'
+        ? `I knew ${life.name} before you arrived. I asked for help over ${hook.stakes}. I still need an answer from this household.`
+        : stance === 'witness'
+          ? `I kept evidence of ${cause}. It bears on ${hook.stakes}. I saw ${life.name} here before the dispute.`
+          : `My people have a claim to ${hook.stakes}. Ask the others why their record contains ${cause}. Their version is not the only one.`;
     return {
       npcId: person.id,
       name: person.name,
@@ -236,6 +244,7 @@ export function generatePersonalStory(
       clan: person.clan,
       stance,
       reason,
+      account,
       target: { x: person.x, y: person.y },
     };
   };
