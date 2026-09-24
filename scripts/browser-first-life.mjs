@@ -16,10 +16,14 @@ async function fixedCandidate(page) {
         }
         return original(array);
       };
+      window.__versoFixedCandidateReady = true;
     })();`,
   });
   await page.cdp.send('Page.reload');
-  await page.wait("window.stichos?.state.modal==='title'");
+  await page.wait(
+    "window.__versoFixedCandidateReady===true && window.stichos?.state.modal==='title' && !!document.querySelector('#s-seed-input')",
+    'the new document and its title controls are ready',
+  );
 }
 
 async function renderSample(page) {
@@ -146,6 +150,23 @@ export async function verifyFirstLife({ endpoint, url, out }) {
     assert.deepEqual(harness.errors, []);
     fs.writeFileSync(path.join(out, 'first-life-results.json'), JSON.stringify(result, null, 2));
     return result;
+  } catch (error) {
+    fs.writeFileSync(
+      path.join(out, 'first-life-failure.json'),
+      JSON.stringify(
+        {
+          error: String(error),
+          state: await page?.state().catch(() => null),
+          titleInput: await page
+            ?.read("!!document.querySelector('#s-seed-input')")
+            .catch(() => null),
+        },
+        null,
+        2,
+      ),
+    );
+    await page?.shot('failure').catch(() => {});
+    throw error;
   } finally {
     await harness.close();
   }
