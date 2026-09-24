@@ -77,9 +77,9 @@ export async function verifyFirstLife({ endpoint, url, out }) {
       true,
     );
     assert.equal(
-      await page.read("getComputedStyle(document.querySelector('#v-voice-mount')).display"),
+      await page.read("getComputedStyle(document.querySelector('#v-ptt')).display"),
       'none',
-      'solo play keeps microphone controls out of the opening scene',
+      'solo play keeps microphone activity out of the opening scene',
     );
     assert.equal(
       await page.read(
@@ -112,6 +112,11 @@ export async function verifyFirstLife({ endpoint, url, out }) {
       return person;
     };
     await speak('ally');
+    assert.equal(
+      await page.read("document.querySelector('.s-dialogue-more')?.open"),
+      false,
+      'optional social actions start folded beneath the case',
+    );
     assert.equal(
       await page.read('document.querySelector(\'[data-choice="personal:trust"]\')?.disabled'),
       true,

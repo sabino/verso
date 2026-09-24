@@ -41,6 +41,8 @@ jobs:
         run: node scripts/ci-browser.mjs
         env:
           VERSO_BASELINE_DIST: ${{ github.event_name == 'pull_request' && '.dream-loop/baseline/dist' || '' }}
+      - name: Capture deterministic score audition
+        run: node scripts/score-audition.mjs .dream-loop/ci-browser
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         if: always()
         with:

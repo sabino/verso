@@ -759,6 +759,20 @@ svg {
   font-size: 10px;
   margin-top: 3px;
 }
+.s-dialogue-more summary {
+  cursor: pointer;
+  color: #aebdb9;
+  font-size: 12px;
+  padding: 9px 13px;
+  border: 1px solid #76837166;
+}
+.s-dialogue-more summary:focus-visible {
+  outline: 2px solid #e1c282;
+  outline-offset: 2px;
+}
+.s-dialogue-more .s-dialogue-choices {
+  margin-top: 7px;
+}
 .s-modal {
   position: absolute;
   inset: 0;

@@ -33,6 +33,12 @@ summary:focus-visible {
   min-width: 0;
 }
 .solo #v-voice-mount {
+  flex: none;
+}
+.solo #v-voice-mount .v-voice-mode,
+.solo #v-ptt,
+.solo #v-voice-status,
+.solo #v-voice-speakers {
   display: none;
 }
 .solo .v-comms-dock {

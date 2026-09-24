@@ -1930,9 +1930,23 @@ function updateDialogue() {
   if (!d) return;
   keys.clear();
   walk = [];
+  const personal = game.personalStory?.relationships.some((person) => person.npcId === d.npcId);
+  const choiceButton = (c: (typeof d.choices)[number]) =>
+    `<button data-choice="${esc(c.id)}" ${c.disabled ? 'disabled' : ''}>${esc(c.label)}${c.detail ? `<small>${esc(c.detail)}</small>` : ''}</button>`;
+  const choices = personal
+    ? `${d.choices
+        .filter((c) => c.id.startsWith('personal:'))
+        .map(choiceButton)
+        .join(
+          '',
+        )}<details class="s-dialogue-more"><summary>Other ways to talk or trade</summary><div class="s-dialogue-choices">${d.choices
+        .filter((c) => !c.id.startsWith('personal:'))
+        .map(choiceButton)
+        .join('')}</div></details>`
+    : d.choices.map(choiceButton).join('');
   el('s-dialogue').innerHTML =
-    `<section role="dialog" aria-label="Conversation with ${esc(d.speaker)}"><div class="s-dialogue-heading"><div><small>${esc(d.role)}</small><h2>${esc(d.speaker)}</h2></div><button id="s-dialogue-close" aria-label="Close conversation">×</button></div><p>${esc(d.text)}</p><div class="s-dialogue-choices">${d.choices.map((c) => `<button data-choice="${esc(c.id)}" ${c.disabled ? 'disabled' : ''}>${esc(c.label)}${c.detail ? `<small>${esc(c.detail)}</small>` : ''}</button>`).join('')}</div></section>`;
-  if (d.role === 'merchant' && d.npcId) {
+    `<section role="dialog" aria-label="Conversation with ${esc(d.speaker)}"><div class="s-dialogue-heading"><div><small>${esc(d.role)}</small><h2>${esc(d.speaker)}</h2></div><button id="s-dialogue-close" aria-label="Close conversation">×</button></div><p>${esc(d.text)}</p><div class="s-dialogue-choices">${choices}</div></section>`;
+  if (d.role === 'merchant' && d.npcId && !personal) {
     const choices = d.choices
       .filter((c) =>
         tradeTab === 'sell'
