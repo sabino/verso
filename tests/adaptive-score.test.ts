@@ -84,6 +84,18 @@ test('town services, dungeon depth, faction identity, victory and weather are se
     ),
   );
 });
+test('safe wilderness has a complete breath of silence while home and temple leave space for voices', () => {
+  const day = worldTimeAt(0);
+  const quiet = composePhrase(8, 3, location, day);
+  assert.deepEqual(quiet.notes, []);
+  assert.ok(composePhrase(8, 3, location, day, 0.6).notes.length > 0);
+  assert.ok(composePhrase(8, 3, { ...location, settlement: true }, day).notes.length > 0);
+  for (const buildingKind of ['house', 'church'] as const) {
+    const inside = composePhrase(8, 0, { ...location, interior: true, buildingKind }, day);
+    assert.ok(inside.notes.some((note) => note.stem === 'melody'));
+    assert.ok(!inside.notes.some((note) => note.stem === 'rhythm'));
+  }
+});
 test('seven bounded original instrument tables and material textures are finite, quiet at boundaries and distinct', () => {
   const instruments: ScoreInstrument[] = [
     'flute',

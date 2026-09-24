@@ -6,6 +6,7 @@ import http from 'node:http';
 import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { verifyPortraitMobile } from './browser-portrait-mobile.mjs';
+import { captureFirstLifeBaseline, verifyFirstLife } from './browser-first-life.mjs';
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A port file can precede HTTP readiness, especially on a cold hosted runner. */
@@ -145,8 +146,7 @@ const mime = {
 async function main() {
   const out = '.dream-loop/ci-browser';
   fs.mkdirSync(out, { recursive: true });
-  const root = path.resolve('dist');
-  const server = http.createServer((req, res) => {
+  const serve = (root) => (req, res) => {
     try {
       const pathname = decodeURIComponent(new URL(req.url, 'http://localhost').pathname);
       const file = path.resolve(root, '.' + pathname, pathname.endsWith('/') ? 'index.html' : '');
@@ -160,10 +160,16 @@ async function main() {
       res.writeHead(404);
       res.end('Not found');
     }
-  });
+  };
+  const server = http.createServer(serve(path.resolve('dist')));
+  const baselineServer = process.env.VERSO_BASELINE_DIST
+    ? http.createServer(serve(path.resolve(process.env.VERSO_BASELINE_DIST)))
+    : null;
   let browser, profile, log;
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
+    if (baselineServer)
+      await new Promise((resolve) => baselineServer.listen(0, '127.0.0.1', resolve));
     let endpoint = process.env.VERSO_BROWSER_CDP;
     if (!endpoint) {
       if (process.env.GITHUB_ACTIONS !== 'true')
@@ -201,11 +207,22 @@ async function main() {
       url: `http://localhost:${server.address().port}/`,
       out,
     });
+    await verifyFirstLife({ endpoint, url: `http://localhost:${server.address().port}/`, out });
+    if (baselineServer)
+      await captureFirstLifeBaseline({
+        endpoint,
+        url: `http://localhost:${baselineServer.address().port}/`,
+        out,
+      });
   } finally {
     browser?.kill('SIGTERM');
     if (log !== undefined) fs.closeSync(log);
     server.closeAllConnections();
     await new Promise((resolve) => server.close(resolve));
+    if (baselineServer?.listening) {
+      baselineServer.closeAllConnections();
+      await new Promise((resolve) => baselineServer.close(resolve));
+    }
   }
 }
 

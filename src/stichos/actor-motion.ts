@@ -9,15 +9,24 @@ export interface HumanoidAction {
 }
 const clamp = (value: number, min: number, max: number) => Math.max(min, Math.min(max, value));
 
-/** A finite six-step action envelope supplements the eight-step walk cycle. Feet stay planted. */
+const ease = (t: number) => t * t * (3 - 2 * t);
+
+/** Continuous weight envelope; only the final drawing is snapped to pixel clusters. */
 export function actionMotion(action: HumanoidAction | null | undefined) {
   if (!action || !Number.isFinite(action.progress))
     return { kind: null, step: 0, strength: 0, settle: 0, crouch: 0, lean: 0 };
-  const step = Math.round(clamp(action.progress, 0, 1) * 6);
-  if (!action.reduced && (step === 0 || step === 6))
+  const t = clamp(action.progress, 0, 1);
+  const step = Math.round(t * 6);
+  if (!action.reduced && (t === 0 || t === 1))
     return { kind: null, step: 0, strength: 0, settle: 0, crouch: 0, lean: 0 };
-  const t = step / 6;
-  const strength = action.reduced ? 0.32 : Math.sin(Math.PI * t);
+  // Prepare the tool, strike near the middle of the stroke, then allow a longer recovery.
+  const strength = action.reduced
+    ? 0.32
+    : t < 0.28
+      ? 0.38 * ease(t / 0.28)
+      : t < 0.52
+        ? 0.38 + 0.62 * ease((t - 0.28) / 0.24)
+        : 1 - ease((t - 0.52) / 0.48);
   const settle = action.reduced ? 0.5 : t;
   const crouch =
     strength *

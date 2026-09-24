@@ -3,7 +3,11 @@ import assert from 'node:assert/strict';
 import { Stichos, RECIPES } from '../src/stichos/session.ts';
 import { InfiniteWorld } from '../src/stichos/world.ts';
 import { generateLifeCandidate } from '../src/stichos/life-origin.ts';
-import { generatePersonalStory, restorePersonalStories } from '../src/stichos/personal-story.ts';
+import {
+  generatePersonalStory,
+  personalThread,
+  restorePersonalStories,
+} from '../src/stichos/personal-story.ts';
 import type { ItemId, Point } from '../src/stichos/types.ts';
 
 function stand(game: Stichos, point: Point) {
@@ -128,6 +132,35 @@ test('all generation-four residents, including Stíchos, bypass the Theo campaig
   assert.equal(legacy.universeLife, false);
   assert.equal(legacy.personalStory, null);
   assert.equal(legacy.quests[0].id, 'first-breath');
+});
+
+test('first life asks for two actual conversations before committing, then connects promise and work', () => {
+  let game = new Stichos(8, 4);
+  assert.ok(game.acceptLife(3).ok);
+  const plan = generatePersonalStory(game.world, game.lifeOrigin!);
+  assert.match(
+    personalThread(game.personalStory!, game.inventory).objective,
+    new RegExp(plan.debt.recipient.name),
+  );
+  game = stand(game, plan.debt.recipient.target);
+  game.interact(plan.debt.recipient.npcId);
+  assert.equal(game.dialogue!.text, plan.debt.recipient.account);
+  assert.match(game.dialogue!.text, /^I knew/);
+  assert.equal(game.dialogue!.choices.find((c) => c.id === 'personal:trust')!.disabled, true);
+  assert.match(personalThread(game.personalStory!, game.inventory).objective, /Talk to/);
+  const witness = plan.relationships.find((r) => r.stance === 'witness')!;
+  game = stand(game, witness.target);
+  game.interact(witness.npcId);
+  assert.equal(game.dialogue!.choices.find((c) => c.id === 'personal:trust')!.disabled, false);
+  assert.equal(personalThread(game.personalStory!, game.inventory).stage, 'Make a choice');
+  game.choose('personal:trust');
+  assert.equal(personalThread(game.personalStory!, game.inventory).stage, 'Keep a promise');
+  const save = game.save();
+  game = Stichos.restore(save);
+  assert.equal(game.personalStory!.relationships.filter((r) => r.heard).length, 2);
+  // Existing v1 records are migrated without losing their work or trusted person.
+  delete save.personalStories!.records[0].heard;
+  assert.equal(Stichos.restore(save).personalStory!.relationships.filter((r) => r.heard).length, 0);
 });
 
 test('resource delivery, a chosen witness, real paid preparation work and a mined/crafted alignment finish one life without duplicate rewards', () => {

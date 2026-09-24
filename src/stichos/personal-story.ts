@@ -12,6 +12,8 @@ export interface PersonalRelationship {
   clan: number;
   stance: 'ally' | 'witness' | 'rival';
   reason: string;
+  /** The resident's own account, distinct from the notebook's third-person history. */
+  account: string;
   target: Point;
 }
 export interface PersonalStoryPlan {
@@ -42,14 +44,16 @@ export interface PersonalStoryRecord {
   repaid: boolean;
   trusted: string | null;
   aligned: boolean;
+  /** People whose account was actually heard, rather than merely seen nearby. */
+  heard?: string[];
 }
 export interface PersonalStoriesState {
   version: 1;
   records: PersonalStoryRecord[];
 }
 export interface PersonalStoryView
-  extends Omit<PersonalStoryPlan, 'relationships' | 'debt' | 'commissionGoal'> {
-  relationships: (PersonalRelationship & { met: boolean; trusted: boolean })[];
+  extends Omit<PersonalStoryPlan, 'relationships' | 'commissionGoal'> {
+  relationships: (PersonalRelationship & { met: boolean; heard: boolean; trusted: boolean })[];
   obligations: {
     id: string;
     title: string;
@@ -227,6 +231,12 @@ export function generatePersonalStory(
         : stance === 'witness'
           ? `${person.name}, a ${role}, retained evidence of ${cause}. Their account connects ${life.name} to ${hook.stakes}.`
           : `${person.name} represents ${profile.factions[person.clan].name} in the dispute over ${hook.stakes}. Their faction could ${motive}; their account may also expose something your friends omitted.`;
+    const account =
+      stance === 'ally'
+        ? `I knew ${life.name} before you arrived. I asked for help over ${hook.stakes}. I still need an answer from this household.`
+        : stance === 'witness'
+          ? `I kept evidence of ${cause}. It bears on ${hook.stakes}. I saw ${life.name} here before the dispute.`
+          : `My people have a claim to ${hook.stakes}. Ask the others why their record contains ${cause}. Their version is not the only one.`;
     return {
       npcId: person.id,
       name: person.name,
@@ -234,6 +244,7 @@ export function generatePersonalStory(
       clan: person.clan,
       stance,
       reason,
+      account,
       target: { x: person.x, y: person.y },
     };
   };
@@ -322,9 +333,11 @@ export function personalStoryView(
     mystery: plan.mystery,
     purpose: plan.purpose,
     signal: { ...plan.signal },
+    debt: structuredClone(plan.debt),
     relationships: plan.relationships.map((r) => ({
       ...structuredClone(r),
       met: known.includes(r.npcId),
+      heard: (record.heard ?? []).includes(r.npcId),
       trusted: record.trusted === r.npcId,
     })),
     obligations: [
@@ -371,6 +384,79 @@ export function personalStoryView(
     complete: record.aligned,
   };
 }
+
+/** The first session follows this body's unfinished business. No separate quest state is saved. */
+export function personalThread(
+  story: PersonalStoryView,
+  inventory: Partial<Record<ItemId, number>>,
+  contract?: {
+    title: string;
+    progress: number;
+    required: number;
+    target: Point;
+    status: string;
+  } | null,
+) {
+  const heard = story.relationships.filter((person) => person.heard);
+  if (!story.obligations[1].complete) {
+    if (heard.length < 2) {
+      const next = [
+        story.relationships.find((person) => person.stance === 'ally'),
+        story.relationships.find((person) => person.stance === 'witness'),
+        story.relationships.find((person) => person.stance === 'rival'),
+      ].find((person) => person && !person.heard)!;
+      return {
+        title: story.case.title,
+        objective: `Talk to ${next.name}. Hear another account before choosing. Click to approach · E to talk.`,
+        target: next.target,
+        stage: 'Hear the people involved',
+      };
+    }
+    return {
+      title: story.case.title,
+      objective:
+        'Speak with either person again and choose an account to back. Their faction will remember.',
+      target: heard[0].target,
+      stage: 'Make a choice',
+    };
+  }
+  if (!story.obligations[0].complete) {
+    const debt = story.debt;
+    const have = inventory[debt.item] ?? 0;
+    return {
+      title: debt.title,
+      objective: `${have}/${debt.required} ${debt.itemName}. ${have >= debt.required ? 'Deliver to' : 'Gather or buy more, then deliver to'} ${debt.recipient.name}.`,
+      target: debt.recipient.target,
+      stage: 'Keep a promise',
+    };
+  }
+  if (!story.obligations[2].complete) {
+    const work = story.obligations[2];
+    return {
+      title: contract?.status === 'active' ? contract.title : work.title,
+      objective:
+        contract?.status === 'active'
+          ? `${contract.progress}/${contract.required} done. Work, then report to the board for pay and standing.`
+          : `${work.progress}/${work.goal} commissions claimed. Read the nearby noticeboard to choose work.`,
+      target: contract?.status === 'active' ? contract.target : work.target,
+      stage: 'Earn local standing',
+    };
+  }
+  if (!story.complete)
+    return {
+      title: story.obligations[3].title,
+      objective: `Craft a lens, then bring it with two ore and one timber to ${story.signal.name}.`,
+      target: story.signal,
+      stage: 'Leave an independent record',
+    };
+  return {
+    title: 'Another life is possible',
+    objective:
+      'Continue this work, or enter a willing person at a quiet memorial. Knowledge travels; possessions stay.',
+    target: undefined,
+    stage: 'Your next life',
+  };
+}
 export function restorePersonalStories(raw: unknown): PersonalStoriesState {
   if (raw === undefined) return { version: 1, records: [] };
   const fail = (): never => {
@@ -396,8 +482,16 @@ export function restorePersonalStories(raw: unknown): PersonalStoriesState {
       typeof r.repaid !== 'boolean' ||
       typeof r.aligned !== 'boolean' ||
       (r.trusted !== null && !id(r.trusted)) ||
-      (r.aligned && (!r.repaid || !r.trusted))
+      (r.aligned && (!r.repaid || !r.trusted)) ||
+      (r.heard !== undefined &&
+        (!Array.isArray(r.heard) ||
+          r.heard.length > 3 ||
+          new Set(r.heard).size !== r.heard.length ||
+          !r.heard.every(id)))
     )
       return fail();
-  return structuredClone(state);
+  return {
+    version: 1,
+    records: state.records.map((r) => ({ ...structuredClone(r), heard: r.heard ?? [] })),
+  };
 }

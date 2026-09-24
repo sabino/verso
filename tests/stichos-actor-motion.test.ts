@@ -7,6 +7,7 @@ import type { Effect } from '../src/stichos/types.ts';
 test('contextual pose envelopes are finite, bounded, quantized, and settle back to planted idle', () => {
   for (const kind of ['gather', 'craft', 'ward', 'heal', 'hurt'] as HumanoidActionKind[]) {
     const steps = new Set<number>();
+    let previous = 0;
     for (let i = -100; i <= 200; i++) {
       const motion = actionMotion({ kind, progress: i / 100 });
       steps.add(motion.step);
@@ -18,10 +19,15 @@ test('contextual pose envelopes are finite, bounded, quantized, and settle back 
       assert.ok(motion.strength >= 0 && motion.strength <= 1);
       assert.ok(motion.crouch >= 0 && motion.crouch <= 6);
       assert.ok(Math.abs(motion.lean) <= 3);
+      if (i >= 0 && i <= 100) {
+        assert.ok(Math.abs(motion.strength - previous) < 0.1, 'pose changes continuously');
+        previous = motion.strength;
+      }
     }
-    assert.equal(steps.size, 6);
+    assert.equal(steps.size, 7);
     assert.equal(actionMotion({ kind, progress: 0 }).strength, 0);
     assert.ok(actionMotion({ kind, progress: 1 }).strength < 1e-12);
+    assert.ok(actionMotion({ kind, progress: 0.1 }).strength > 0);
     assert.equal(actionMotion({ kind, progress: 0 }).kind, null);
     assert.equal(actionMotion({ kind, progress: 1 }).kind, null);
     assert.deepEqual(
