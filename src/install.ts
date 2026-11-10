@@ -1,26 +1,26 @@
 import { detectAppMode } from './app-mode.ts';
-interface InstallPrompt extends Event {
-  prompt(): Promise<void>;
-  userChoice: Promise<{ outcome: 'accepted' | 'dismissed' }>;
-}
-let deferred: InstallPrompt | null = null;
+import { InstallFlow, type AppInstallPrompt } from './install-state.ts';
+const installFlow = new InstallFlow(changed);
 addEventListener('beforeinstallprompt', (event) => {
   event.preventDefault();
-  deferred = event as InstallPrompt;
+  installFlow.capture(event as Event & AppInstallPrompt);
 });
+addEventListener('pagehide', () => installFlow.cancel());
+export const installStatus = () => installFlow.snapshot;
 let installObserved = false;
 let launchObserved = false;
 const launchQueue = (
   window as Window & { launchQueue?: { setConsumer: (callback: () => void) => void } }
 ).launchQueue;
 export function appMode() {
-  return detectAppMode({
+  const mode = detectAppMode({
     matches: (query) => matchMedia(query).matches,
     iosStandalone: (navigator as Navigator & { standalone?: boolean }).standalone,
     launchQueueSupported: !!launchQueue,
     launchObserved,
     installObserved,
   });
+  return { ...mode, installation: installFlow.snapshot };
 }
 export function installed() {
   return appMode().installedWindow;
@@ -30,7 +30,7 @@ function changed() {
 }
 addEventListener('appinstalled', () => {
   installObserved = true;
-  changed();
+  installFlow.installed();
 });
 for (const mode of ['standalone', 'minimal-ui', 'window-controls-overlay', 'fullscreen']) {
   const query = matchMedia(`(display-mode: ${mode})`);
@@ -47,17 +47,14 @@ try {
 } catch {}
 export async function requestInstall(): Promise<string> {
   if (installed()) return 'Verso is already running as an installed app.';
-  if (deferred) {
-    const prompt = deferred;
-    deferred = null;
-    try {
-      await prompt.prompt();
-      return (await prompt.userChoice).outcome === 'accepted'
-        ? 'Verso is being added to your apps.'
-        : 'You can install later from this menu.';
-    } catch {
-      return 'Installation did not finish. Use your browser’s Install or Add to Home Screen option to try again.';
-    }
+  const request = installFlow.request();
+  if (request) {
+    const outcome = await request;
+    if (outcome === 'installed') return 'Verso has been added to your apps.';
+    if (outcome === 'accepted') return 'Verso is being added to your apps.';
+    if (outcome === 'dismissed' || outcome === 'cancelled')
+      return 'You can install later from this menu.';
+    return 'Installation did not finish. Use your browser’s Install or Add to Home Screen option to try again.';
   }
   if (
     /iPad|iPhone|iPod/.test(navigator.userAgent) ||

@@ -151,16 +151,8 @@ export function createPeerTransport(
     : null;
   const persist = (latest = false) => {
     if (!activated || !persistence) return;
-    return (latest ? persistence.flushLatest() : persistence.flush()).catch(() => {
-      wire.onmessage?.({
-        data: JSON.stringify({
-          type: 'error',
-          code: 'storage_failed',
-          reason:
-            'This world could not be saved in browser storage. Free browser storage and keep this tab open until saving succeeds.',
-        }),
-      });
-    });
+    // The persistence owner latches and broadcasts degraded status until a write succeeds.
+    return (latest ? persistence.flushLatest() : persistence.flush()).catch(() => {});
   };
   const onPageHide = () => {
     void persist(true);
@@ -187,6 +179,7 @@ export function createPeerTransport(
     close() {
       if (closed) return;
       closed = true;
+      hub?.beginClosing();
       wire.readyState = 3;
       clearInterval(heartbeat);
       clearInterval(combatClock);

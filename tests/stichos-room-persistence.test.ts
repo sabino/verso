@@ -655,3 +655,271 @@ test('known-world client rejects changed live keys before world/combat callbacks
   assert.equal(machineCalls, 1);
   valid.disconnect();
 });
+
+test('a failed authority save freezes writes and simulation, preserves receipts, and recovers only after a committed retry', async (t) => {
+  const { hub, advance } = fixture(t);
+  const a = traveler(hub),
+    room = a.welcome.room;
+  const original = {
+    type: 'chat',
+    requestId: 'r1',
+    channel: 'world',
+    text: 'Before storage failed',
+  };
+  a.send(original);
+  assert.equal(a.socket.get('chat_result').ok, true);
+  let fail = false;
+  let release: (() => void) | null = null;
+  let hold = false;
+  let enteredRecovery!: () => void;
+  const recoveryStarted = new Promise<void>((resolve) => {
+    enteredRecovery = resolve;
+  });
+  const records: any[] = [];
+  const writer = new RoomPersistence(hub, async (record) => {
+    if (fail) throw Error('Disk is full');
+    if (hold)
+      await new Promise<void>((resolve) => {
+        release = resolve;
+        enteredRecovery();
+      });
+    records.push(record);
+  });
+  await writer.flush();
+  const durable = hub.getDurability(room);
+  assert.equal(durable.phase, 'healthy');
+  assert.equal(durable.lastSavedRevision, 1);
+  assert.equal(durable.lastSavedAt, records[0].checkpoint.createdAt);
+  fail = true;
+  await assert.rejects(writer.flush(), /Disk is full/);
+  const degraded = hub.getDurability(room);
+  assert.equal(degraded.phase, 'degraded');
+  assert.equal(degraded.lastSavedRevision, durable.lastSavedRevision);
+  assert.equal(degraded.lastSavedAt, durable.lastSavedAt);
+  const state = JSON.stringify(hub.exportRoom(room));
+  advance(2000);
+  hub.tick(0.05);
+  a.send({ type: 'pose', x: 1, y: 5, heading: 0, phase: 0, appearance: look });
+  a.send({ ...original, requestId: 'r2', text: 'Must not commit' });
+  assert.equal(a.socket.get('chat_result').ok, false);
+  assert.match(a.socket.get('chat_result').reason, /paused/);
+  a.send(original);
+  assert.equal(
+    a.socket.get('chat_result').ok,
+    true,
+    'An exact retry still receives its original receipt.',
+  );
+  a.send({ ...original, text: 'Different payload' });
+  assert.equal(
+    a.socket.get('chat_result').ok,
+    false,
+    'Cached receipts still require the same fingerprint.',
+  );
+  const newcomer = traveler(hub, { room });
+  assert.equal(newcomer.welcome, undefined);
+  assert.equal(newcomer.socket.get('error').code, 'storage_failed');
+  assert.equal(
+    JSON.stringify(hub.exportRoom(room)),
+    state,
+    'No world, member, pose, or request ledger mutation while degraded.',
+  );
+  fail = false;
+  hold = true;
+  const recovery = writer.flush();
+  await recoveryStarted;
+  assert.ok(release);
+  assert.deepEqual(hub.getDurability(room), degraded, 'Starting the retry does not clear failure.');
+  (release as () => void)();
+  await recovery;
+  assert.equal(hub.getDurability(room).phase, 'healthy');
+  assert.equal(
+    hub.getDurability(room).lastSavedRevision,
+    2,
+    'Failed saves do not advance the signed chain.',
+  );
+  assert.equal(records[1].checkpoint.previous, records[0].checkpoint.hash);
+  a.send({ ...original, requestId: 'r2', text: 'Recovery permits this request' });
+  assert.equal(a.socket.get('chat_result').ok, true);
+  assert.ok(traveler(hub, { room }).welcome);
+});
+
+test('latest shutdown capture retries after an older save fails instead of inheriting its rejection', async (t) => {
+  const { hub } = fixture(t),
+    a = traveler(hub);
+  let rejectFirst!: (error: Error) => void;
+  let enteredFirst!: () => void;
+  const firstStarted = new Promise<void>((resolve) => {
+    enteredFirst = resolve;
+  });
+  let saves = 0;
+  const writer = new RoomPersistence(hub, () => {
+    if (++saves === 1)
+      return new Promise<void>((_, reject) => {
+        rejectFirst = reject;
+        enteredFirst();
+      });
+  });
+  const older = writer.flush();
+  const rejected = assert.rejects(older, /First write failed/);
+  await firstStarted;
+  assert.ok(rejectFirst);
+  const latest = writer.flushLatest();
+  rejectFirst(Error('First write failed'));
+  await rejected;
+  await latest;
+  assert.equal(saves, 2);
+  assert.equal(hub.getDurability(a.welcome.room).phase, 'healthy');
+  assert.equal(hub.getDurability(a.welcome.room).lastSavedRevision, 1);
+});
+
+test('local durability and replica failure are separate and restart retries the last committed public checkpoint', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'verso-replica-retry-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { hub } = fixture(t),
+    a = traveler(hub),
+    room = a.welcome.room;
+  const disk = await attachRoomDisk(hub, directory, {
+    onCheckpoint: async () => {
+      throw Error('Bridge offline');
+    },
+  });
+  await disk.flush();
+  assert.equal(hub.getDurability(room).phase, 'healthy');
+  assert.equal(disk.replication()[0].phase, 'degraded');
+  assert.equal(disk.replication()[0].lastPublishedRevision, null);
+  const saved = JSON.parse(await readFile(join(directory, `${room}.json`), 'utf8'));
+  const restored = new CoopRooms({ durable: true });
+  const publications: any[] = [];
+  const restoredDisk = await attachRoomDisk(restored, directory, {
+    onCheckpoint: async (checkpoint: any) => {
+      publications.push(checkpoint);
+    },
+  });
+  assert.equal(restored.getDurability(room).lastSavedRevision, saved.checkpoint.revision);
+  assert.equal(restored.getDurability(room).lastSavedAt, saved.checkpoint.createdAt);
+  assert.equal(restoredDisk.replication()[0].phase, 'pending');
+  await restoredDisk.flush();
+  assert.equal(publications.length, 1);
+  assert.equal(restoredDisk.replication()[0].phase, 'healthy');
+  assert.equal(restoredDisk.replication()[0].lastPublishedRevision, 2);
+  assert.equal('owner' in publications[0], false);
+  assert.equal(JSON.stringify(publications[0]).includes(a.welcome.resumeToken), false);
+});
+
+test('browser index failure preserves the previous signed record and permits the next save to recover', async (t) => {
+  const descriptor = Object.getOwnPropertyDescriptor(globalThis, 'localStorage');
+  const data = new Map<string, string>();
+  let blockIndex = false;
+  Object.defineProperty(globalThis, 'localStorage', {
+    configurable: true,
+    value: {
+      getItem: (key: string) => data.get(key) ?? null,
+      setItem: (key: string, value: string) => {
+        if (blockIndex && key === 'verso-room-v1:worlds') throw Error('Index quota exceeded');
+        data.set(key, value);
+      },
+      removeItem: (key: string) => data.delete(key),
+    },
+  });
+  t.after(() => {
+    if (descriptor) Object.defineProperty(globalThis, 'localStorage', descriptor);
+    else delete (globalThis as any).localStorage;
+  });
+  const { hub } = fixture(t),
+    a = traveler(hub),
+    room = a.welcome.room;
+  const writer = new RoomPersistence(hub, (saved) => {
+    if (!storeRoom(saved)) throw Error('Save failed');
+  });
+  await writer.flush();
+  const original = (await loadSavedRoom(room))!.checkpoint;
+  blockIndex = true;
+  await assert.rejects(writer.flush(), /Save failed/);
+  assert.equal((await loadSavedRoom(room))!.checkpoint.hash, original.hash);
+  blockIndex = false;
+  await writer.flush();
+  assert.equal(hub.getDurability(room).phase, 'healthy');
+  assert.equal((await loadSavedRoom(room))!.checkpoint.revision, 2);
+});
+
+test('combat acknowledgements drain a saturated receipt ledger during storage failure and permit recovery without reconnect', async (t) => {
+  const { hub } = fixture(t),
+    a = traveler(hub, { combatActive: true, bodyId: 'body:ack' });
+  const room: any = hub.rooms.get(a.welcome.room),
+    authority: any = hub;
+  const member: any = a.connection.member;
+  for (let i = 0; i < 512; i++) {
+    const frame = room.combat.environmentalContacts([
+      { actorId: 'fauna:1:0:0:1', peer: authority.combatPeer(member), damage: 1 },
+    ]);
+    authority.recordCombat(room, frame);
+  }
+  assert.equal(member.combatHits.size, 512);
+  assert.equal(authority.combatPeer(member).combatActive, false);
+  let fail = false;
+  const writer = new RoomPersistence(hub, () => {
+    if (fail) throw Error('Storage failed');
+  });
+  await writer.flush();
+  fail = true;
+  await assert.rejects(writer.flush(), /Storage failed/);
+  a.send({ type: 'combat_ack', eventId: room.combatEvent + 1 });
+  assert.equal(
+    member.combatHits.size,
+    512,
+    'Unknown receipt IDs still cannot erase delivery history.',
+  );
+  a.send({ type: 'combat_ack', eventId: room.combatEvent });
+  assert.equal(member.combatHits.size, 0);
+  fail = false;
+  await writer.flush();
+  assert.equal(authority.combatPeer(member).combatActive, true);
+  a.send({ type: 'combat', kind: 'ward', heading: 0, requestId: 'r1' });
+  assert.equal(a.socket.get('combat_result').ok, true);
+  assert.equal(hub.getDurability(room.id).phase, 'healthy');
+});
+
+test('completion of an older replica publication keeps a newer durable checkpoint visibly pending', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'verso-replica-pending-'));
+  t.after(() => rm(directory, { recursive: true, force: true }));
+  const { hub } = fixture(t),
+    a = traveler(hub);
+  let publishStarted!: () => void, finishPublish!: () => void;
+  const publishing = new Promise<void>((resolve) => {
+    publishStarted = resolve;
+  });
+  const heldPublish = new Promise<void>((resolve) => {
+    finishPublish = resolve;
+  });
+  t.after(() => finishPublish());
+  const disk = await attachRoomDisk(hub, directory, {
+    onCheckpoint: async () => {
+      publishStarted();
+      await heldPublish;
+    },
+  });
+  const first = disk.flush();
+  await publishing;
+  let savedSecond!: () => void;
+  const secondSaved = new Promise<void>((resolve) => {
+    savedSecond = resolve;
+  });
+  const setDurability = hub.setDurability.bind(hub);
+  hub.setDurability = (room, status) => {
+    setDurability(room, status);
+    if (status.lastSavedRevision === 2) savedSecond();
+  };
+  const second = disk.flush();
+  await secondSaved;
+  // The local save hook fires before its flush joins the already-running publisher.
+  // Drain that continuation before allowing the first publication to finish.
+  await new Promise<void>((resolve) => setImmediate(resolve));
+  finishPublish();
+  await Promise.all([first, second]);
+  assert.equal(hub.getDurability(a.welcome.room).lastSavedRevision, 2);
+  assert.equal(disk.replication()[0].lastPublishedRevision, 1);
+  assert.equal(disk.replication()[0].phase, 'pending');
+  await disk.flush();
+  assert.equal(disk.replication()[0].phase, 'healthy');
+  assert.equal(disk.replication()[0].lastPublishedRevision, 3);
+});

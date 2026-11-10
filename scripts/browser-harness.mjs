@@ -124,7 +124,16 @@ export async function browserHarness(endpoint, out) {
   );
   const clients = [],
     errors = [];
-  async function page(name, url, { width = 1440, height = 960, mobile = false } = {}) {
+  async function page(
+    name,
+    url,
+    {
+      width = 1440,
+      height = 960,
+      mobile = false,
+      ready = "window.stichos?.state.modal==='title'",
+    } = {},
+  ) {
     if (!['localhost', '127.0.0.1'].includes(new URL(url).hostname))
       throw Error('This harness is local-only.');
     const { browserContextId } = await browser.send('Target.createBrowserContext');
@@ -281,7 +290,7 @@ export async function browserHarness(endpoint, out) {
     await cdp.send('Emulation.setTouchEmulationEnabled', { enabled: mobile, maxTouchPoints: 5 });
     await resize(width, height);
     await cdp.send('Page.navigate', { url });
-    await wait("window.stichos?.state.modal==='title'", 'title ready');
+    await wait(ready, 'initial route ready');
     await read('document.fonts.ready.then(()=>true)');
     return client;
   }

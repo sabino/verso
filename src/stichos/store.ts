@@ -3,6 +3,7 @@ import { drawHumanoid } from './art.ts';
 import { COSMETICS, previewCosmetic } from './progression.ts';
 import { formatStorePrice, hostedCheckoutUrl } from './store-protocol.ts';
 import { configuredStoreOrigin } from './hosting.ts';
+import { WalletRequestQueue } from './store-lifecycle.ts';
 import './store.css';
 
 interface CatalogSkin {
@@ -20,6 +21,7 @@ const premium = COSMETICS.filter((style) => style.currency === 'premium');
 const mounted = new WeakMap<HTMLElement, symbol>();
 const verifiedWallets = new WeakMap<Stichos, string[]>();
 const walletRequests = new WeakMap<Stichos, number>();
+const walletQueue = new WalletRequestQueue();
 
 const storeOrigin = configuredStoreOrigin;
 const nextWalletRequest = (game: Stichos) => {
@@ -46,11 +48,13 @@ export async function restoreStoreEntitlements(game: Stichos, onChange: () => vo
   }
   let ids: string[] = [];
   try {
-    const response = await fetch(`${origin}/api/store/wallet`, {
-      credentials: 'include',
-      signal: AbortSignal.timeout(8000),
+    const wallet = await walletQueue.run(async () => {
+      const response = await fetch(`${origin}/api/store/wallet`, {
+        credentials: 'include',
+        signal: AbortSignal.timeout(8000),
+      });
+      return response.ok ? response.json() : null;
     });
-    const wallet = response.ok ? await response.json() : null;
     if (
       Array.isArray(wallet?.entitlements) &&
       wallet.entitlements.every((id: unknown) => typeof id === 'string')
@@ -120,7 +124,7 @@ export async function mountStore(
     restoreDraft = '',
     revealCode = false;
 
-  const request = async (path: string, init: RequestInit = {}) => {
+  const performRequest = async (path: string, init: RequestInit = {}) => {
     let response: Response;
     try {
       response = await fetch(`${origin}/api/store/${path}`, {
@@ -140,6 +144,10 @@ export async function mountStore(
       );
     return data;
   };
+  const request = (path: string, init: RequestInit = {}) =>
+    path === 'catalog'
+      ? performRequest(path, init)
+      : walletQueue.run(() => performRequest(path, init), current);
   const setWallet = (ids: string[]) => {
     const changed = applyWallet(game, ids);
     entitlements = verifiedWallets.get(game)!;
@@ -150,7 +158,9 @@ export async function mountStore(
     node.type = 'button';
     node.dataset.storeAction = key;
     node.disabled = disabled;
-    node.addEventListener('click', action);
+    node.addEventListener('click', () => {
+      if (current() && !node.disabled) action();
+    });
     return node;
   };
   const render = () => {
@@ -406,6 +416,11 @@ export async function mountStore(
       request('wallet'),
     ]);
     if (!current()) return;
+    if (walletRequests.get(game) !== walletRequest) {
+      busy = false;
+      await refresh();
+      return;
+    }
     busy = false;
     loaded = true;
     catalog = prices.status === 'fulfilled' ? prices.value : null;
@@ -458,7 +473,12 @@ export async function mountStore(
         headers: { 'Content-Type': 'application/json', 'X-Verso-CSRF': csrf },
         body: JSON.stringify(path === 'recover' ? { recoveryCode: code } : {}),
       });
-      if (!current() || walletRequests.get(game) !== walletRequest) return;
+      if (!current()) return;
+      if (walletRequests.get(game) !== walletRequest) {
+        busy = false;
+        await refresh();
+        return;
+      }
       if (
         typeof result?.csrf !== 'string' ||
         result.csrf.length < 16 ||

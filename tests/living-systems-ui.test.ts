@@ -216,6 +216,67 @@ test('estate home, storage, work and station flows bind real owner and worker id
   );
 });
 
+test('worker recovery binds current authority readiness, exact cost and native disabled reasons', () => {
+  const f = fixture(),
+    w = f.property.workers[0];
+  w.loyalty = 14;
+  w.journeyState = 'unreachable';
+  w.recovery = {
+    reconcile: {
+      ok: false,
+      code: 'insufficient-coins',
+      message: 'Carry 4 field coins to renew the agreement.',
+      cost: { coins: 4, items: {} },
+    },
+    retry: {
+      ok: true,
+      code: 'ready',
+      message: 'Retry the remembered destination after clearing its route.',
+      cost: { coins: 0, items: {} },
+    },
+  };
+  const ui = state('estates', { detail: 'real:house', view: 'station:real:sawmill' });
+  const built = renderLivingSystemsPanel(f, ui);
+  const commandId = (kind: string) =>
+    [...built.actions].find(
+      ([, action]) =>
+        action.kind === 'command' &&
+        action.command.kind === 'property' &&
+        action.command.command.kind === kind,
+    )![0];
+  const reconcileId = commandId('reconcile-worker'),
+    retryId = commandId('retry-worker');
+  assert.match(built.html, /Renew agreement · 4 field coins · loyalty 25/);
+  assert.match(
+    built.html,
+    new RegExp(
+      `<button[^>]*data-living-action="${reconcileId}"[^>]* disabled[^>]*aria-describedby="worker-reconcile-person:1"`,
+    ),
+  );
+  assert.match(built.html, /id="worker-reconcile-person:1"[^>]*>Carry 4 field coins/);
+  assert.doesNotMatch(
+    built.html,
+    new RegExp(`<button[^>]*data-living-action="${retryId}"[^>]* disabled`),
+  );
+  assert.deepEqual(built.actions.get(retryId), {
+    kind: 'command',
+    command: {
+      kind: 'property',
+      command: { kind: 'retry-worker', propertyId: 'real:house', npcId: 'person:1' },
+    },
+  });
+  delete w.recovery;
+  const old = renderLivingSystemsPanel(f, ui);
+  assert.match(old.html, /world needs an update before worker agreements/);
+  assert.match(old.html, /disabled[^>]*aria-describedby="worker-reconcile-person:1"/);
+  delete w.stationId;
+  const idle = renderLivingSystemsPanel(
+    f,
+    state('estates', { detail: 'real:house', view: 'work' }),
+  );
+  assert.match(idle.html, /Renew agreement · 4 field coins/);
+});
+
 test('demolition uses a concrete revision confirmation and occupied property cannot be purchased', () => {
   const f = fixture();
   const e = f.property.estates[0] as Estate;

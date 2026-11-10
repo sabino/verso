@@ -250,6 +250,8 @@ export interface Quest {
   description: string;
   stage: number;
   complete: boolean;
+  /** A withdrawn quest is terminal but remains complete=false for old readers. */
+  outcome?: 'withdrawn';
   target?: Point;
   objective: string;
 }

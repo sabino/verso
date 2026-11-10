@@ -174,10 +174,18 @@ test('survey completion requires distinct species, extraction, and next world re
   game.interact();
   assert.equal(game.phase, 'complete');
   const next = game.next();
+  assert.ok(next);
   assert.equal(next.crossing, 1);
   assert.equal(next.rootSeed, 73);
-  assert.notEqual(next.world.seed, twin.next().world.seed);
-  assert.deepEqual(game.next().world, next.world);
+  for (const a of twin.actors.slice(0, 3)) {
+    twin.player.position = { ...a.position };
+    twin.interact();
+  }
+  twin.player.position = { ...twin.world.gate };
+  twin.interact();
+  assert.equal(twin.phase, 'complete');
+  assert.notEqual(next.world.seed, twin.next()!.world.seed);
+  assert.deepEqual(game.next()!.world, next.world);
 });
 
 test('restoring a vessel reconstructs its anatomy without replaying action history', () => {
@@ -288,4 +296,71 @@ test('attune and hunt assignments can complete with their actually generated wea
     found.add(kind);
   }
   assert.equal(found.size, 2);
+});
+
+test('mending and phase transitions reject without spending or changing action history', () => {
+  const game = new Crossing(3886);
+  const initial = {
+    seed: game.actionSeed,
+    vessel: game.vessel,
+    memory: game.memories,
+    hp: game.player.hp,
+  };
+  assert.equal(game.actionAvailability('heal').reason, 'full-health');
+  assert.equal(game.heal(), false);
+  assert.equal(game.reincarnate(), false);
+  assert.equal(game.next(), null);
+  assert.deepEqual(
+    { seed: game.actionSeed, vessel: game.vessel, memory: game.memories, hp: game.player.hp },
+    initial,
+  );
+  game.player.hp -= 3;
+  assert.equal(game.heal(), true);
+  assert.equal(game.player.hp, initial.hp);
+  assert.equal(game.memories, initial.memory - 1);
+  assert.notEqual(game.actionSeed, initial.seed);
+  game.player.hp = 0;
+  game.update(0.02, idle);
+  assert.equal(game.phase, 'dead');
+  const deadSeed = game.actionSeed;
+  for (const action of ['heal', 'jump', 'interact', 'attack'] as const) {
+    assert.equal(game.actionAvailability(action).reason, 'body-lost');
+    assert.equal(game[action](), false);
+  }
+  assert.equal(game.next(), null);
+  assert.equal(game.actionSeed, deadSeed);
+  game.bolts.push({
+    position: { ...game.player.position },
+    velocity: { x: 1, y: 0, z: 0 },
+    life: 1,
+    core: 'heat',
+    power: 1,
+    damage: 1,
+  });
+  assert.equal(game.reincarnate(), true);
+  assert.equal(game.vessel, initial.vessel + 1);
+  assert.equal(game.phase, 'playing');
+  assert.equal(game.bolts.length, 0, 'a previous body cannot resume its active attack');
+  assert.equal(game.reincarnate(), false);
+});
+
+test('procedural rejected commands preserve resources and previews become ready after recovery', () => {
+  const game = new Crossing(3886);
+  const history = game.actionSeed;
+  game.player.grounded = false;
+  assert.equal(game.jump(), false);
+  assert.equal(game.actionSeed, history);
+  game.player.hp -= 1;
+  game.memories = 0;
+  assert.equal(game.actionAvailability('heal').reason, 'no-memory');
+  assert.equal(game.heal(), false);
+  game.memories = 1;
+  assert.equal(game.actionAvailability('heal').allowed, true);
+  assert.equal(game.heal(), true);
+  game.player.cooldown = 1;
+  assert.equal(game.actionAvailability('attack').reason, 'recovering');
+  assert.equal(game.attack(), false);
+  game.player.cooldown = 0;
+  assert.equal(game.attack(), true);
+  assert.equal(game.actionAvailability('attack').reason, 'recovering');
 });

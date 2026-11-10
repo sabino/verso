@@ -42,6 +42,21 @@ export interface Intent {
   run: boolean;
   aim: number;
 }
+export type CrossingAction = 'attack' | 'jump' | 'interact' | 'heal' | 'reincarnate' | 'next';
+export type CrossingActionReason =
+  | 'body-lost'
+  | 'assignment-complete'
+  | 'body-alive'
+  | 'assignment-unfinished'
+  | 'recovering'
+  | 'airborne'
+  | 'cannot-jump'
+  | 'no-memory'
+  | 'full-health'
+  | 'nothing-nearby';
+export type CrossingAvailability =
+  | { allowed: true; reason: null; message: null }
+  | { allowed: false; reason: CrossingActionReason; message: string };
 export class Crossing {
   world: WorldPlan;
   player: Actor;
@@ -132,27 +147,87 @@ export class Crossing {
           distance(a.position, this.player.position) - distance(b.position, this.player.position),
       )[0];
   }
-  interact() {
-    if (this.phase !== 'playing') return;
+  actionAvailability(action: CrossingAction): CrossingAvailability {
+    const blocked = (reason: CrossingActionReason, message: string): CrossingAvailability => ({
+      allowed: false,
+      reason,
+      message,
+    });
+    if (action === 'reincarnate')
+      return this.phase === 'dead'
+        ? { allowed: true, reason: null, message: null }
+        : blocked('body-alive', 'Another body is available only after this vessel is lost.');
+    if (action === 'next')
+      return this.phase === 'complete'
+        ? { allowed: true, reason: null, message: null }
+        : blocked(
+            'assignment-unfinished',
+            'Return the completed assignment through the rift first.',
+          );
+    if (this.phase !== 'playing')
+      return this.phase === 'dead'
+        ? blocked('body-lost', 'Borrow another life before acting.')
+        : blocked(
+            'assignment-complete',
+            'This assignment is returned. Continue to the next crossing.',
+          );
+    if (action === 'attack' && this.player.cooldown > 0)
+      return blocked('recovering', 'The issued weapon is recovering.');
+    if (action === 'jump') {
+      if (this.player.genome.jump <= 0)
+        return blocked(
+          'cannot-jump',
+          'This anatomy cannot jump. Its other movement traits still apply.',
+        );
+      if (!this.player.grounded) return blocked('airborne', 'Land before jumping again.');
+    }
+    if (action === 'heal') {
+      if (this.player.hp >= this.player.maxHp)
+        return blocked('full-health', 'This body is already whole. No memory is needed.');
+      if (this.memories < 1)
+        return blocked(
+          'no-memory',
+          'Read an uncataloged lifeform or recover a lost memory before mending.',
+        );
+    }
+    if (
+      action === 'interact' &&
+      !(distance(this.player.position, this.world.gate) < 1.6 && this.ready) &&
+      !(this.belongings && distance(this.player.position, this.belongings) < 1.5) &&
+      !this.nearby
+    )
+      return blocked(
+        'nothing-nearby',
+        this.ready ? 'Return to the rift.' : 'Approach a lifeform to read its anatomy.',
+      );
+    return { allowed: true, reason: null, message: null };
+  }
+  private admit(action: CrossingAction) {
+    const available = this.actionAvailability(action);
+    if (!available.allowed) this.message = available.message;
+    return available.allowed;
+  }
+  interact(): boolean {
+    if (!this.admit('interact')) return false;
     this.record('interact');
     if (distance(this.player.position, this.world.gate) < 1.6 && this.ready) {
       this.phase = 'complete';
       this.message = 'Assignment returned. The next world remembers your actions.';
-      return;
+      return true;
     }
     if (this.belongings && distance(this.player.position, this.belongings) < 1.5) {
       this.memories += this.belongingsAmount;
       this.belongingsAmount = 0;
       this.belongings = null;
       this.message = 'The previous vessel’s memories are yours again.';
-      return;
+      return true;
     }
     const actor = this.nearby;
     if (!actor) {
       this.message = this.ready
         ? 'Return to the rift.'
         : 'Approach a lifeform to read its anatomy.';
-      return;
+      return false;
     }
     actor.scanned = true;
     if (!this.scanned.includes(actor.genome.id)) {
@@ -169,26 +244,25 @@ export class Crossing {
       core: actor.genome.affinity,
       radius: 1,
     });
+    return true;
   }
-  jump() {
-    if (this.phase !== 'playing' || !this.player.grounded) return;
+  jump(): boolean {
+    if (!this.admit('jump')) return false;
     this.record('jump');
-    if (this.player.genome.jump <= 0) {
-      this.message = 'This anatomy cannot jump. Its other movement traits still apply.';
-      return;
-    }
     this.player.vy = this.player.genome.jump;
     this.player.grounded = false;
+    return true;
   }
-  heal() {
-    if (this.memories <= 0 || this.phase !== 'playing') return;
+  heal(): boolean {
+    if (!this.admit('heal')) return false;
     this.record('mend');
     this.memories--;
     this.player.hp = Math.min(this.player.maxHp, this.player.hp + 40);
     this.message = 'A memory becomes living tissue.';
+    return true;
   }
-  attack() {
-    if (this.phase !== 'playing' || this.player.cooldown > 0) return;
+  attack(): boolean {
+    if (!this.admit('attack')) return false;
     this.record('attack');
     const w = this.world.weapon,
       p = this.player;
@@ -218,6 +292,7 @@ export class Crossing {
       if (distance(p.position, this.world.resonator) < radius + 1) this.attune(w.core, w.power);
     }
     this.message = `${w.name}: ${w.core} through ${w.trigger}.`;
+    return true;
   }
   private attune(core: string, power: number) {
     if (core === this.world.weapon.core) {
@@ -435,13 +510,18 @@ export class Crossing {
       this.message = 'That vessel has ended. Another anatomy can continue.';
     }
   }
-  reincarnate() {
+  reincarnate(): boolean {
+    if (!this.admit('reincarnate')) return false;
     this.vessel++;
     this.player = this.makeHost();
     this.phase = 'playing';
+    this.bolts = [];
+    this.bursts = [];
     this.record('new-host');
+    return true;
   }
-  next() {
+  next(): Crossing | null {
+    if (!this.admit('next')) return null;
     return new Crossing(
       deriveSeed(this.world.seed, 'crossing', this.actionSeed, this.kills, this.scanned.join(',')),
       this.crossing + 1,

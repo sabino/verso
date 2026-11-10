@@ -407,3 +407,29 @@ test(
     assert.equal(node.feeds()[0].length, 1);
   },
 );
+
+test(
+  'closing rejects new publish and follow calls but drains publication admitted before verification',
+  { timeout: 20000 },
+  async (t) => {
+    const directory = await mkdtemp(join(tmpdir(), 'verso-pear-closing-'));
+    const node = await createPearBridge({ directory, token: TOKEN, bootstrap: [] });
+    t.after(async () => {
+      await node.close();
+      await rm(directory, { recursive: true, force: true });
+    });
+    const checkpoint = await signRoomCheckpoint(emptyState(), await createRoomSigningIdentity());
+    const publication = node.publish(checkpoint);
+    const closing = node.close();
+    await assert.rejects(node.publish(checkpoint), /closing/);
+    await assert.rejects(node.follow('a'.repeat(64)), /closing/);
+    const result = await publication;
+    assert.equal(result.revision, 1, 'An admitted call completes before its store is closed.');
+    await closing;
+    await assert.rejects(node.publish(checkpoint), /closing/);
+    await assert.rejects(node.follow(result.key), /closing/);
+    const reopened = await createPearBridge({ directory, token: TOKEN, bootstrap: [] });
+    t.after(() => reopened.close());
+    assert.equal(reopened.feeds()[0].revision, 1, 'Shutdown retained the admitted commit.');
+  },
+);

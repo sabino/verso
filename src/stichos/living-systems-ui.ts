@@ -4,6 +4,7 @@ import { FIELD_ITEMS, FIELD_RECIPES, type FieldBundle, type FieldItem } from './
 import {
   ESTATE_RECIPES,
   ESTATE_STATIONS,
+  WORKER_RECONCILIATION,
   propertyPrice,
   type Estate,
   type PropertyCommand,
@@ -460,6 +461,24 @@ export function renderLivingSystemsPanel(
     if (e) {
       const view = state.view ?? 'home';
       const workers = frame.property.workers.filter((w) => w.estateId === e.id);
+      const recoveryControls = (w: (typeof workers)[number]) => {
+        const controls: string[] = [];
+        if (w.loyalty < WORKER_RECONCILIATION.refusalBelow) {
+          const ready = w.recovery?.reconcile;
+          const description = `worker-reconcile-${esc(w.id)}`;
+          controls.push(
+            `<p id="${description}" class="v-living-note">${esc(ready?.message ?? 'This world needs an update before worker agreements can be renewed.')}</p>${button(`Renew agreement · ${WORKER_RECONCILIATION.coins} field coins · loyalty ${WORKER_RECONCILIATION.loyalty}`, { kind: 'command', command: { kind: 'property', command: { kind: 'reconcile-worker', propertyId: e.id, npcId: w.id } } }, !ready?.ok, `aria-describedby="${description}"`)}`,
+          );
+        }
+        if (w.journeyState === 'unreachable') {
+          const ready = w.recovery?.retry;
+          const description = `worker-retry-${esc(w.id)}`;
+          controls.push(
+            `<p id="${description}" class="v-living-note">${esc(ready?.message ?? 'This world needs an update before worker routes can be retried.')}</p>${button('Retry worker route', { kind: 'command', command: { kind: 'property', command: { kind: 'retry-worker', propertyId: e.id, npcId: w.id } } }, !ready?.ok, `aria-describedby="${description}"`)}`,
+          );
+        }
+        return controls.join('');
+      };
       body = `${back()}${heading(e.offer.name, e.tenure === 'rented' ? `Rented · ${Math.max(0, Math.ceil(((e.leaseUntil ?? 0) - frame.elapsed) / 60))} minutes remaining` : 'Owned property')}<nav class="v-living-subnav" aria-label="Estate pages">${nav('Home', e.id, 'home')}${nav('Supplies', e.id, 'storage')}${nav('Work', e.id, 'work')}</nav>`;
       if (view === 'storage') {
         const formId = 'living-storage',
@@ -491,6 +510,13 @@ export function renderLivingSystemsPanel(
           body += empty(
             'Build a workstation, hire a real person, then deposit supplies and queue work.',
           );
+        body += workers
+          .filter((w) => !w.stationId)
+          .map(
+            (w) =>
+              `<section class="v-living-task"><h3>${esc(w.name)}</h3>${notice(`${w.status} · loyalty ${Math.round(w.loyalty)}`)}${recoveryControls(w)}</section>`,
+          )
+          .join('');
       } else if (view === 'build') {
         body += list(
           (Object.keys(ESTATE_STATIONS) as StationKind[]).map((kind) =>
@@ -534,6 +560,7 @@ export function renderLivingSystemsPanel(
             job = station.job,
             recipe = ESTATE_RECIPES.find((r) => r.id === job?.recipe);
           body += `${heading(ESTATE_STATIONS[station.kind].name, station.status)}<p>${w ? `${esc(w.name)} · ${esc(w.status)} · loyalty ${Math.round(w.loyalty)}` : 'No worker assigned'}</p>`;
+          if (w) body += recoveryControls(w);
           if (job)
             body += `<div class="v-living-progress"><label for="living-work-progress">${esc(recipe?.name ?? job.recipe)} · ${job.completed} delivered / ${job.remaining} remaining</label><progress id="living-work-progress" max="${recipe?.seconds ?? 1}" value="${job.elapsed}"></progress></div>${property('Cancel unworked batches', { kind: 'cancel-job', propertyId: e.id, stationId: station.id })}`;
           else {

@@ -4,6 +4,7 @@ import {
   PropertyWorld,
   ESTATE_RECIPES,
   PROPERTY_RULES,
+  WORKER_RECONCILIATION,
   estateWorkerProfile,
   propertyPrice,
   validPropertySave,
@@ -13,7 +14,7 @@ import {
   type PropertyPerson,
 } from '../src/stichos/property-world.ts';
 import { FieldEconomy, type FieldBundle } from '../src/stichos/field-loot.ts';
-import type { ActorAddress } from '../src/stichos/actor-ledger.ts';
+import { ActorLedger, type ActorAddress } from '../src/stichos/actor-ledger.ts';
 import { HierarchicalNavigator } from '../src/stichos/navigation.ts';
 
 const at = (x: number, y: number): ActorAddress => ({ spaceId: 'surface', x, y });
@@ -110,6 +111,7 @@ function setup() {
     permission: () => ({ ok: !forbidden, reason: 'Local guild refuses this agreement.' }),
     customers: () => customerCount,
     transact: (...args) => bank.transact(...args),
+    balance: (id) => bank.satchel(id),
   };
   const world = new PropertyWorld(77, adapters);
   let serial = 0;
@@ -186,6 +188,213 @@ test('offers and workers are seed-derived; acquisition is actual, local, exclusi
   assert.equal(f.run(c, 0, 'alice', 'same').ok, false);
   assert.equal(f.run(c, 0, 'bob').ok, false);
   assert.equal(f.world.save().estates.length, 1);
+});
+
+test('unpaid refusal has a costed, local, replay-safe recovery without resetting the reserved batch', () => {
+  const f = setup();
+  f.own();
+  const { station, person } = f.employee();
+  f.run({ kind: 'deposit', propertyId: 'house', bundle: { coins: 0, items: { wood: 3 } } });
+  f.run({
+    kind: 'queue',
+    propertyId: 'house',
+    stationId: station,
+    recipe: 'saw-boards',
+    batches: 1,
+  });
+  f.bank.transact(
+    'alice',
+    { coins: f.bank.satchel('alice')!.coins, items: {} },
+    blank(),
+    'spend-all',
+  );
+  let now = 0;
+  for (let n = 0; n < 80 && f.world.save().workers[0].loyalty >= 15; n++)
+    f.world.tick((now += 61), 0.5);
+  f.world.tick(++now, 0.5);
+  const refused = f.world.save();
+  assert.equal(refused.workers[0].phase, 'collecting');
+  assert.equal(refused.workers[0].loyalty, 14);
+  assert.deepEqual(refused.estates[0].stations[0].job!.reserved, { wood: 3 });
+  assert.equal(f.world.frame('alice', at(1, 1), now).workers[0].pauseReason, 'loyalty');
+  const command = { kind: 'reconcile-worker' as const, propertyId: 'house', npcId: person.id };
+  assert.equal(
+    f.world.workerRecovery('alice', 'house', person.id, command.kind, now).code,
+    'insufficient-coins',
+  );
+  assert.equal(f.run(command, now).ok, false);
+  assert.deepEqual(
+    f.world.save(),
+    refused,
+    'failed recovery cannot change any worker or reservation',
+  );
+  f.bank.transact('alice', blank(), { coins: 100, items: {} }, 'restore-pay');
+  for (let n = 0; n < 100; n++) f.world.tick(++now, 0.5);
+  assert.equal(
+    f.world.save().workers[0].loyalty,
+    14,
+    'funding alone does not silently forgive a broken agreement',
+  );
+  f.setForbidden(true);
+  assert.equal(f.run(command, now).ok, false, 'money does not bypass civic refusal');
+  f.setForbidden(false);
+  f.peers.set('alice', at(30, 30));
+  assert.equal(f.run(command, now).ok, false, 'owner must meet the actual worker');
+  f.peers.set('alice', at(1, 1));
+  assert.equal(f.run(command, now, 'bob').ok, false, 'another owner cannot renew this contract');
+  person.alive = false;
+  assert.equal(f.run(command, now).ok, false);
+  person.alive = true;
+  const before = f.world.save();
+  assert.equal(f.run(command, now, 'alice', 'renew-worker').ok, true);
+  const renewed = f.world.save();
+  assert.equal(renewed.workers[0].loyalty, WORKER_RECONCILIATION.loyalty);
+  assert.equal(renewed.workers[0].unpaidSince, undefined);
+  assert.deepEqual(renewed.workers[0].cargo, before.workers[0].cargo);
+  assert.deepEqual(renewed.estates[0].stations[0].job, before.estates[0].stations[0].job);
+  assert.equal(f.bank.satchel('alice')!.coins, 96);
+  assert.equal(f.run(command, now, 'alice', 'renew-worker').ok, false);
+  const restored = new PropertyWorld(77, f.adapters, renewed);
+  assert.equal(
+    restored.command('alice', command, 'renew-worker', now).ok,
+    false,
+    'receipt survives reload',
+  );
+  assert.equal(
+    restored.command('alice', command, 'unneeded-renewal', now).ok,
+    false,
+    'healthy contracts cannot be farmed',
+  );
+  for (let n = 0; n < 150 && restored.getEstate('house')!.stations[0].job; n++) {
+    restored.tick(++now, 0.5);
+    f.moveWorkers();
+    assert.equal(validPropertySave(restored.save()), true);
+  }
+  assert.equal(restored.getEstate('house')!.stations[0].produced, 1);
+  assert.equal(restored.getEstate('house')!.storage.items.planks, 2);
+  assert.equal(f.bank.satchel('alice')!.coins, 95, 'one contract fee and one ordinary batch wage');
+});
+
+test('contract recovery retains loaded cargo, paid wages and identity, and expired leases remain paused', () => {
+  const f = setup();
+  f.own();
+  const { station, person } = f.employee();
+  f.run({ kind: 'deposit', propertyId: 'house', bundle: { coins: 0, items: { wood: 3 } } });
+  f.run({
+    kind: 'queue',
+    propertyId: 'house',
+    stationId: station,
+    recipe: 'saw-boards',
+    batches: 1,
+  });
+  f.world.tick(1, 0.5);
+  for (let n = 0; n < 3; n++) f.world.react('alice', 'injured-worker', person);
+  const before = f.world.save();
+  assert.equal(before.workers[0].phase, 'carrying-input');
+  assert.equal(before.estates[0].stations[0].job!.wageFunded, true);
+  const rented = structuredClone(before);
+  Object.assign(rented.estates[0], { tenure: 'rented', leaseUntil: 1 });
+  assert.equal(validPropertySave(rented), true);
+  const leaseWorld = new PropertyWorld(77, f.adapters, rented);
+  assert.equal(
+    leaseWorld.workerRecovery('alice', 'house', person.id, 'reconcile-worker', 2).code,
+    'lease-expired',
+  );
+  const coins = f.bank.satchel('alice')!.coins;
+  assert.equal(
+    f.run({ kind: 'reconcile-worker', propertyId: 'house', npcId: person.id }, 2).ok,
+    true,
+  );
+  const renewed = f.world.save();
+  assert.deepEqual(renewed.workers[0].cargo, before.workers[0].cargo);
+  assert.equal(renewed.workers[0].phase, before.workers[0].phase);
+  assert.deepEqual(renewed.estates[0].stations[0].job, before.estates[0].stations[0].job);
+  for (let t = 3; t < 160 && f.world.getEstate('house')!.stations[0].job; t++) {
+    f.moveWorkers();
+    f.world.tick(t, 0.5);
+  }
+  assert.equal(f.world.getEstate('house')!.stations[0].produced, 1);
+  assert.equal(
+    f.bank.satchel('alice')!.coins,
+    coins - WORKER_RECONCILIATION.coins,
+    'already-paid wage is not charged twice',
+  );
+  assert.equal(f.world.save().workers[0].id, person.id);
+});
+
+test('a loaded worker retries a failed actor route only on explicit owner action, then delivers exactly once', () => {
+  const f = setup();
+  f.own();
+  const { station, person } = f.employee();
+  const actors = new ActorLedger<PropertyPerson>();
+  actors.register(person, 'worker', 0);
+  const originalPerson = f.adapters.person;
+  f.adapters.person = (id) => {
+    const actor = actors.get(id);
+    return actor
+      ? { ...actor.body, x: actor.x, y: actor.y, spaceId: actor.spaceId }
+      : originalPerson(id);
+  };
+  f.adapters.journey = (id) => actors.get(id);
+  f.adapters.travel = (id, destination, options) => {
+    actors.setDestination(id, destination, options);
+    return actors.get(id)?.state === 'unreachable' ? 'unreachable' : 'traveling';
+  };
+  let sealed = true;
+  const navigation = {
+    cell: (x: number, y: number) => ({
+      kind:
+        x < -2 || y < -2 || x > 12 || y > 12 || (sealed && x === 2) || f.world.blocks(at(x, y))
+          ? ('blocked' as const)
+          : ('open' as const),
+    }),
+  };
+  f.run({ kind: 'deposit', propertyId: 'house', bundle: { coins: 0, items: { wood: 3 } } });
+  f.run({
+    kind: 'queue',
+    propertyId: 'house',
+    stationId: station,
+    recipe: 'saw-boards',
+    batches: 1,
+  });
+  const coins = f.bank.satchel('alice')!.coins;
+  let now = 0;
+  for (; now < 500 && actors.get(person.id)!.state !== 'unreachable'; now++) {
+    f.world.tick(now + 1, 0.5);
+    actors.advance(now + 1, () => navigation);
+  }
+  assert.equal(actors.get(person.id)!.state, 'unreachable');
+  const failed = actors.get(person.id)!;
+  const batch = f.world.save();
+  assert.equal(batch.workers[0].phase, 'carrying-input');
+  assert.deepEqual(batch.workers[0].cargo.items, { wood: 3 });
+  sealed = false;
+  for (let n = 0; n < 20; n++) {
+    f.world.tick(++now, 0.5);
+    actors.advance(now, () => navigation);
+  }
+  assert.deepEqual(
+    actors.get(person.id),
+    failed,
+    'normal property ticks never restart failed searches',
+  );
+  const command = { kind: 'retry-worker' as const, propertyId: 'house', npcId: person.id };
+  assert.equal(f.run(command, now, 'bob').ok, false);
+  assert.equal(f.world.frame('alice', at(1, 1), now).workers[0].recovery!.retry.ok, true);
+  assert.equal(f.run(command, now, 'alice', 'retry-route').ok, true);
+  assert.equal(actors.get(person.id)!.state, 'planning');
+  assert.deepEqual(f.world.save().workers[0].cargo, batch.workers[0].cargo);
+  assert.deepEqual(f.world.getEstate('house')!.stations[0].job, batch.estates[0].stations[0].job);
+  assert.equal(f.run(command, now, 'alice', 'retry-route').ok, false);
+  assert.equal(f.run(command, now).ok, false, 'an active journey cannot be restarted by retry');
+  for (let n = 0; n < 1000 && f.world.getEstate('house')!.stations[0].job; n++) {
+    f.world.tick(++now, 0.5);
+    actors.advance(now, () => navigation);
+    assert.equal(validPropertySave(f.world.save()), true);
+  }
+  assert.equal(f.world.getEstate('house')!.stations[0].produced, 1);
+  assert.equal(f.world.getEstate('house')!.storage.items.planks, 2);
+  assert.equal(f.bank.satchel('alice')!.coins, coins - 1);
 });
 
 test('legacy home adoption needs authority proof and never imports personal goods', () => {

@@ -6,6 +6,11 @@ import {
 
 const PREFIX = 'verso-room-v1:';
 let memoryId = '';
+let identityStored = true;
+let lastBrowserId = '';
+/** A caller-supplied external identity does not use this browser identity store. */
+export const browserPlayerIdentityStored = (id?: string) =>
+  id && id !== lastBrowserId ? true : identityStored;
 const read = (key: string) => {
   try {
     return JSON.parse(localStorage.getItem(PREFIX + key) ?? 'null');
@@ -23,9 +28,14 @@ const write = (key: string, value: unknown) => {
 };
 export function getBrowserPlayerId(): string {
   const old = read('identity');
-  if (typeof old === 'string' && /^[a-f0-9-]{36}$/.test(old)) return old;
+  if (typeof old === 'string' && /^[a-f0-9-]{36}$/.test(old)) {
+    lastBrowserId = old;
+    identityStored = true;
+    return old;
+  }
   memoryId ||= crypto.randomUUID();
-  write('identity', memoryId);
+  lastBrowserId = memoryId;
+  identityStored = write('identity', memoryId);
   return memoryId;
 }
 export interface RoomCredential {
@@ -51,13 +61,17 @@ export function saveRoomCredential(endpoint: string, room: string, value: RoomCr
   const key = credentialKey(endpoint, room),
     old = read('credentials');
   const keys = [key, ...(Array.isArray(old) ? old : []).filter((k) => k !== key)];
-  if (!write(key, value)) return false;
+  if (!write('credentials', keys.slice(0, 64))) return false;
+  if (!write(key, value)) {
+    write('credentials', old);
+    return false;
+  }
   for (const stale of keys.slice(64)) {
     try {
       localStorage.removeItem(PREFIX + stale);
     } catch {}
   }
-  return write('credentials', keys.slice(0, 64));
+  return true;
 }
 export function forgetRoomCredential(endpoint: string, room: string) {
   try {
@@ -146,6 +160,13 @@ export function storeRoom(saved: SavedRoom): boolean {
   const keys = [room, ...(Array.isArray(old) ? old : []).filter((c) => c !== room)];
   // Explicit capacity failure preserves owned planets rather than silently deleting one.
   if (keys.length > 24) return false;
-  if (!write(`world:${room}`, saved)) return false;
-  return write('worlds', keys);
+  // Publish the discoverability index before the atomic record write. If the index fails
+  // after replacing a signed record, the owner cannot retry the same revision with a new
+  // signature/hash. An index entry without a record is ignored by savedWorlds().
+  if (!write('worlds', keys)) return false;
+  if (!write(`world:${room}`, saved)) {
+    write('worlds', old);
+    return false;
+  }
+  return true;
 }

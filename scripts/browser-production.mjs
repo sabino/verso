@@ -77,9 +77,11 @@ async function traveler(name) {
   });
   const targets = await (await fetch(`${endpoint}/json/list`)).json();
   const wire = [];
+  const intercepted = [];
   const page = await connect(
     targets.find((t) => t.id === targetId).webSocketDebuggerUrl,
     (method, params) => {
+      if (method === 'Fetch.requestPaused') intercepted.push(params);
       if (method === 'Network.webSocketFrameSent' || method === 'Network.webSocketFrameReceived') {
         try {
           const m = JSON.parse(params.response.payloadData);
@@ -208,6 +210,7 @@ async function traveler(name) {
     name,
     page,
     wire,
+    intercepted,
     browserContextId,
     read,
     wait,
@@ -323,6 +326,53 @@ try {
       blockedReason: typing.interaction.capabilities.move.reason,
     }),
   );
+  // A refused delivery keeps the real draft; switching to local speech can retry it.
+  const draft = 'A draft survives a refused room message.';
+  await c.click('[data-chat-channel="world"]');
+  await c.fill('#v-chat-input', draft);
+  await c.key('Enter', 'Enter', 13);
+  await c.wait(
+    "window.stichos.state.requests.chat?.status==='failed'",
+    'room-only speech fails while solo',
+  );
+  assert.equal(await c.read("document.querySelector('#v-chat-input').value"), draft);
+  assert.equal(await c.read('document.activeElement.id'), 'v-chat-input');
+  await c.click('[data-chat-channel="say"]');
+  await c.click('#v-chat-input');
+  await c.key('Enter', 'Enter', 13);
+  await c.wait(
+    "document.querySelector('#v-chat-input').value===''",
+    'accepted local speech clears its submitted draft',
+  );
+  assert.ok((await c.read("document.querySelector('#v-chat-log').textContent")).includes(draft));
+  pass('A failed chat send preserves the draft and focus; accepted retry clears it');
+
+  // Delay the external companion response, close its screen, then release the request.
+  // CDP controls only the network boundary; all application actions use native input.
+  await c.click('#s-sound');
+  await c.click('.v-app-diagnostics > summary');
+  await c.click('#v-ai');
+  await c.click('[data-screen="ai"] details > summary');
+  await c.page.send('Fetch.enable', { patterns: [{ urlPattern: 'http://127.0.0.1:4176/*' }] });
+  await c.fill('#v-ai-code', 'abcdefghijklmnopqrstuvwxyz123456');
+  await c.click('#v-ai-pair button');
+  const companionDeadline = Date.now() + 10000;
+  while (!c.intercepted.length && Date.now() < companionDeadline) await delay(50);
+  assert.ok(c.intercepted.length, 'Companion check reached the intercepted external request');
+  await c.click('#v-ai-close');
+  for (const request of c.intercepted.splice(0))
+    await c.page
+      .send('Fetch.failRequest', { requestId: request.requestId, errorReason: 'Aborted' })
+      .catch(() => {});
+  await c.page.send('Fetch.disable');
+  await c.wait(
+    "window.stichos.state.modal===''&&window.stichos.state.requests.panel?.status==='cancelled'",
+    'closing companion setup settles its presentation owner',
+  );
+  await delay(150);
+  assert.equal((await c.state()).modal, '');
+  pass('Closing an in-flight companion check cancels its owner without reopening detached UI');
+
   const keyWalk = async (point) => {
     for (let n = 0; n < 30; n++) {
       const p = (await c.state()).player,
@@ -575,7 +625,33 @@ try {
   assert.deepEqual(restored.productionStructures[0], collected.productionStructures[0]);
   pass('Reload and Continue preserve the structure, depleted inputs, coins and collected output');
   await c.shot('07-restored-garden');
-  fs.writeFileSync(path.join(out, 'final-state.json'), JSON.stringify(restored, null, 2));
+  const merchant = (await c.state()).npcs.find((npc) => npc.role === 'merchant' && npc.hp > 0);
+  assert.ok(merchant, 'A living merchant is reachable in the starter settlement');
+  await approach(merchant);
+  const liveMerchant = (await c.state()).npcs.find((npc) => npc.id === merchant.id);
+  assert.ok(liveMerchant);
+  await c.worldClick(liveMerchant);
+  await c.wait(
+    '!!document.querySelector(\'[data-trade-select="buy:cequin"]\')',
+    'native interaction opens merchant stock',
+  );
+  await c.click('[data-trade-select="buy:cequin"]');
+  await c.selectIndex('#v-trade-quantity', 1);
+  const beforePurchase = await c.state();
+  await c.click('#v-trade-confirm');
+  await c.wait(
+    `window.stichos.state.inventory.cequin===${(beforePurchase.inventory.cequin ?? 0) + 5}`,
+    'one native click buys exactly the selected five portions',
+  );
+  assert.equal(await c.read("document.querySelector('#v-trade-quantity').value"), '5');
+  assert.equal(await c.read('document.activeElement.id'), 'v-trade-confirm');
+  assert.equal((await c.state()).player.coins, beforePurchase.player.coins - 20);
+  await c.shot('08-trade-preserves-quantity-focus');
+  await c.click('#s-dialogue-close');
+  pass(
+    'Merchant redraw preserves quantity and confirmation focus after an exact five-item purchase',
+  );
+  fs.writeFileSync(path.join(out, 'final-state.json'), JSON.stringify(await c.state(), null, 2));
   assert.deepEqual(errors, []);
   pass('No browser exceptions or error logs');
 } catch (error) {

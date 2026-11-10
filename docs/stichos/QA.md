@@ -1,12 +1,20 @@
-# Release verification · 2026-09-11
+# Release verification · 2026-11-10
 
-## Current generation-four release evidence
+## Lifecycle closure integration checkpoint
+
+The lifecycle closure addresses all 13 recorded findings and the additional gaps in the preserved 97-group [state inventory](../STATE-MACHINES.md). Scope, implementation decisions, compatibility and focused evidence are recorded in [Lifecycle closure](../LIFECYCLE-CLOSURE.md).
+
+The integrated `npm test` run completed **970 tests: 969 passed, 0 failed, 1 existing skip**, in **41.2 seconds**. The full formatting check and explicit server/Pear formatting checks passed. A subsequent malformed-save retry correction passed **16 affected tests**, `tsc --noEmit` and a fresh full `npm run build`: Retry restore now performs actual validation/restoration, and reading bytes alone cannot clear a restore error. The 970-test run precedes that correction; the final production build includes it. Hosted validation of the exact final revision is next.
+
+**Hosted browser and native Pear results remain pending for this revision.** The prepared browser routes include ordinary input and explicitly staged storage/network failures. Local Chromium could not start because its singleton socket was denied; native Pear tests were blocked by `udx-native` network-interface observation permissions. Neither is a passing run. The older published/browser/native results below apply only to their named historical checkpoints.
+
+## Archived generation-four release evidence · 2026-09-11
 
 Verso’s primary start is a generated resident in a generated civilization. Geography, climate, practical technology, personal history, relationships and body-owned equipment reconstruct from their recorded seeds and generator version. Stíchos is one optional civilization; Theo’s authored story remains the explicit generation-three legacy entry. The current behavior is described in [generated worlds and lives](GENERATED-LIVES.md), [ordinary equipment](ORDINARY-EQUIPMENT.md) and [the life/universe contract](UNIVERSE.md).
 
 The full suite passed **384/384 tests in 79.92 seconds**, with no failures, skips or cancellations, at source `2a083ee`. Formatting and production build passed. The final housing correction at `fcb0c64` then passed **24 focused tests**, covering actual local residential homes, personal story completion/reload, paid worker jobs, ecology, planned parcels and legacy compatibility; TypeScript and formatting passed again. Evidence: `.dream-loop/generation4-release-tests.log`. Public asset identity and final browser verification are recorded in [PAGES.md](PAGES.md).
 
-### Current public deployment
+### Public deployment at that checkpoint
 
 Pages commit `404b771` and successful run `34633591760` serve `app-C_d-KSbm.js` / `app-Cees6plc.css`, service worker `0c5a8a2e0e01ac7429f2`. All 31 non-HTML assets match local SHA-256. The actual public three-browser route passed with three distinct generation-four lives, URL joining, QR display, mobile code-only joining and correct electronic avatar context, with no runtime exceptions or error logs. These are three browser contexts on one machine, not three separately operated Internet connections. The public path also passed all four generated-life persistence/offline checks, including exact saved identity, location, appearance and inventory, correct nested PWA scope, decoded install icons and actual walking with page and service-worker networking disabled. No browser errors occurred. [Deployment details](PAGES.md).
 
@@ -41,7 +49,7 @@ All four completed repair runs reported **zero browser errors**. An initial sour
 
 Fresh independent reviews of the generated-world art improved from 4.4 to 5.3, 5.6, 6.1 and **6.5/10** for the woodland sample (6.4 for the dry settlement). The **8/10 visual target is not reached**. Structural roof faces, full cross gables, planted compounds and actual orchard trees improved the scenes; repeated undergrowth, rigid town layout and spatial lighting remain the main visual gaps. The latest graded town captures measured approximately **53–54 foreground FPS**, compared with approximately 60 before the additional planting and grade. These are bounded samples in the workspace browser, not a hardware benchmark. Evidence: `.dream-loop/woodland-village/world.png`, `.dream-loop/woodland-round3/world.png`, and the preserved prior captures in `.dream-loop/woodland-before-courtyards/`.
 
-### Current boundaries
+### Boundaries at that checkpoint
 
 Normal life storage is automatic and browser-local. The main UI has no routine Download save or Restore a save controls. The file-import/export results below belong to their named historical builds. Host departure ends the shared session; personal inventory, story and bodily needs remain local. Household worker orders currently operate in solo worlds. Signed checkpoints and optional native public replication retain the existing host authority model.
 

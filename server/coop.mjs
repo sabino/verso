@@ -34,7 +34,7 @@ export function createCoopServer({
   storeHandler = async () => false,
   allowedOrigins = [],
   persistenceDirectory = process.env.VERSO_WORLD_STORAGE || null,
-  onCheckpoint = async () => {},
+  onCheckpoint,
   trustedProxyHops = 0,
   maxConnections = 512,
   maxConnectionsPerIp = 32,
@@ -94,6 +94,9 @@ export function createCoopServer({
             ),
             durable: !!disk,
             storageHealthy: !persistenceError,
+            // Public health must not disclose private invitation codes or member credentials.
+            storage: [...hub.rooms.keys()].map((room) => hub.getDurability(room)),
+            replication: (disk?.replication() ?? []).map(({ room: _room, ...status }) => status),
             voice: voiceRelay?.diagnostics() ?? { enabled: false },
           }),
         );
@@ -177,6 +180,7 @@ export function createCoopServer({
     close() {
       if (!closing)
         closing = (async () => {
+          hub.beginClosing();
           clearInterval(timer);
           clearInterval(combatTimer);
           clearInterval(persistenceTimer);

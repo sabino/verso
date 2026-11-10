@@ -713,7 +713,13 @@ function processEvents() {
   }
 }
 function perform(kind: ActionKind) {
-  if (modal || !hasStarted) return;
+  if (modal || !hasStarted || pausedByVisibility || document.hidden) return;
+  const availability = game.controlAvailability(kind);
+  if (!availability.allowed) {
+    notify(availability.message);
+    updateUI();
+    return;
+  }
   if (kind === 'scan') {
     const interaction = game.getInteraction();
     if (interaction) game.interact();
@@ -781,8 +787,41 @@ function updateUI() {
     button.classList.toggle('on-cooldown', cd > 0);
     button.style.setProperty('--cooldown', String(Math.min(1, cd / duration)));
     button.classList.toggle('depleted', kind === 'mend' && p.fragments === 0);
+    const availability = game.controlAvailability(kind);
+    const reason =
+      modal || !hasStarted || pausedByVisibility || document.hidden
+        ? 'Return to the assignment to act.'
+        : availability.message;
+    button.disabled = !!reason;
+    button.setAttribute('aria-disabled', String(button.disabled));
+    button.dataset.blockedReason = reason ? (availability.reason ?? 'screen') : '';
+    button.setAttribute('aria-description', reason ?? 'Ready');
+    const label =
+      kind === 'scan'
+        ? (game.getInteraction()?.label ?? 'Scan')
+        : kind === 'mend'
+          ? 'Mend'
+          : kind === 'dash'
+            ? 'Dash'
+            : kind === 'pulse'
+              ? 'Pulse'
+              : 'Blade';
+    button.setAttribute('aria-label', reason ? `${label}: ${reason}` : label);
+    if (reason) button.title = reason;
+    else if (kind !== 'blade' && kind !== 'pulse') button.title = label;
   }
   const interaction = game.getInteraction();
+  const interactionButton = el<HTMLButtonElement>('touch-interact');
+  const interactionAvailability = game.controlAvailability('scan');
+  interactionButton.disabled =
+    !!modal ||
+    !hasStarted ||
+    pausedByVisibility ||
+    document.hidden ||
+    !interactionAvailability.allowed;
+  interactionButton.setAttribute('aria-disabled', String(interactionButton.disabled));
+  interactionButton.setAttribute('aria-description', interactionAvailability.message ?? 'Ready');
+  interactionButton.dataset.blockedReason = interactionAvailability.reason ?? '';
   el('interaction').classList.toggle('hidden', !interaction || !!modal);
   if (interaction) {
     const point = renderer.toScreen({ x: s.player.x, y: s.player.y + 34 });
@@ -1110,6 +1149,14 @@ Object.defineProperty(window, 'verso', {
     },
     get modal() {
       return modal;
+    },
+    get actions() {
+      return Object.fromEntries(
+        (['blade', 'pulse', 'dash', 'scan', 'mend'] as ActionKind[]).map((kind) => [
+          kind,
+          game.controlAvailability(kind),
+        ]),
+      );
     },
     get loaded() {
       return renderer.loaded;

@@ -39,6 +39,7 @@ export const ACTOR_LEDGER_RULES = Object.freeze({
   maxNavigators: 8,
   maxCoarseSeconds: 2,
   maxCoarseDistance: 4,
+  arrivalDistance: 0.85,
 });
 interface Journey {
   navigator: HierarchicalNavigator;
@@ -170,6 +171,14 @@ export class ActorLedger<T extends ActorBody> {
   has(id: string) {
     return this.records.has(id);
   }
+  /** Detached checkpoint working copy. Restore still validates untrusted saves;
+   * this trusted copy preserves records, but deliberately starts no live routes. */
+  fork() {
+    const copy = new ActorLedger<T>();
+    copy.records = clone(this.records);
+    copy.cells = clone(this.cells);
+    return copy;
+  }
   destination(id: string): ActorAddress | undefined {
     const destination = this.records.get(id)?.destination;
     return destination && { ...destination };
@@ -244,6 +253,18 @@ export class ActorLedger<T extends ActorBody> {
     record.x = body.x;
     record.y = body.y;
     if (spaceId) record.spaceId = spaceId;
+    // Arrival describes the current location, not a permanent completed-task tombstone.
+    // External movement keeps the intention but makes it navigable again; ordinary
+    // captures at the goal and explicit unreachable journeys remain idempotent.
+    if (
+      record.state === 'arrived' &&
+      record.destination &&
+      (record.spaceId !== record.destination.spaceId ||
+        distance(record, record.destination) > ACTOR_LEDGER_RULES.arrivalDistance)
+    ) {
+      record.state = 'planning';
+      this.journeys.delete(record.id);
+    }
     record.simulatedAt = time;
     record.revision++;
     this.index(record);
@@ -358,6 +379,19 @@ export class ActorLedger<T extends ActorBody> {
       scanned++
     ) {
       const actor = records[this.cursor++ % records.length];
+      // Older checkpoints may contain an arrived actor subsequently displaced by
+      // fine simulation. Reopen that intention during simulation, never during save/read.
+      if (
+        actor.state === 'arrived' &&
+        actor.destination &&
+        time > actor.simulatedAt &&
+        !options.active?.has(actor.id) &&
+        (actor.spaceId !== actor.destination.spaceId ||
+          distance(actor, actor.destination) > ACTOR_LEDGER_RULES.arrivalDistance)
+      ) {
+        actor.state = 'planning';
+        actor.revision++;
+      }
       if (
         actor.state === 'dead' ||
         !actor.destination ||
