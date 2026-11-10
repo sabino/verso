@@ -2,6 +2,7 @@ import { JOURNAL_ENTRIES, PLANT_NOTES, GLOSSARY } from './lore.ts';
 import { plantGenome, plantProfile } from './botany.ts';
 import type { PlantKind } from './botany.ts';
 import type { Stichos } from './session.ts';
+import { personalThread } from './personal-story.ts';
 
 export type NotebookSection = 'years' | 'botany' | 'glossary' | 'threads';
 export interface NotebookView {
@@ -78,7 +79,27 @@ function botanicalStudy(seed: number, kind: PlantKind, author = 'T. Bishop') {
 }
 
 function threads(game: Stichos) {
-  return `<div class="s-notebook-threads"><section><h3>Threads to follow</h3>${game.quests.map((q) => `<article class="s-quest-record ${q.complete ? 'complete' : ''}"><small>${q.complete ? 'Resolved' : 'Unfinished'}</small><h4>${esc(q.title)}</h4><p>${esc(q.description)}</p><b>${esc(q.objective)}</b>${q.target ? `<span>Near ${Math.round(q.target.x)}, ${Math.round(q.target.y)}</span>` : ''}${!q.complete ? `<button class="s-track-quest" data-track-quest="${esc(q.id)}">Follow this thread</button>` : ''}</article>`).join('')}<h3>${game.universeLife ? 'Local allegiances' : 'The six families'}</h3>${game.world.clans.map((c, i) => `<div class="s-clan-row"><i style="background:${c.color}"></i><strong>${esc(c.name)}</strong><span>Trust ${game.reputation[i] ?? 0}</span></div>`).join('')}</section><section><h3>Since this morning</h3><p class="s-notebook-caption">These pages change with the life you lead.</p>${game.journal
+  const story = game.universeLife ? game.personalStory : null;
+  const next = story ? personalThread(story, game.inventory, game.freeLife.contract) : null;
+  const nextStep = next
+    ? `<article class="s-quest-record" aria-label="Current objective"><small>${esc(next.stage)}</small><h3>${esc(next.title)}</h3><p>${esc(next.objective)}</p>${next.target ? `<span>Near ${Math.round(next.target.x)}, ${Math.round(next.target.y)}</span>` : ''}</article>`
+    : '';
+  const questCard = (q: Stichos['quests'][number]) => {
+    const description = q.description.trim();
+    const objective = q.objective.trim();
+    // Personal obligations already include their description after the progress count.
+    // Remove only that exact repetition; distinct instructions remain visible in full.
+    const prefix =
+      description && objective.endsWith(description)
+        ? objective.slice(0, -description.length).trim()
+        : null;
+    const detail =
+      prefix !== null && /^(?:\d+\s*\/\s*\d+\s*·)?$/.test(prefix)
+        ? prefix.replace(/\s*·$/, '')
+        : objective;
+    return `<article class="s-quest-record ${q.complete ? 'complete' : ''}"><small>${q.complete ? 'Resolved' : 'Unfinished'}</small><h4>${esc(q.title)}</h4>${description ? `<p>${esc(description)}</p>` : ''}${detail ? `<b>${esc(detail)}</b>` : ''}${q.target ? `<span>Near ${Math.round(q.target.x)}, ${Math.round(q.target.y)}</span>` : ''}${!q.complete ? `<button class="s-track-quest" data-track-quest="${esc(q.id)}">Follow this thread</button>` : ''}</article>`;
+  };
+  return `<div class="s-notebook-threads"><section>${nextStep}<h3>Threads to follow</h3>${game.quests.map(questCard).join('')}<h3>${game.universeLife ? 'Local allegiances' : 'The six families'}</h3>${game.world.clans.map((c, i) => `<div class="s-clan-row"><i style="background:${c.color}"></i><strong>${esc(c.name)}</strong><span>Trust ${game.reputation[i] ?? 0}</span></div>`).join('')}</section><section><h3>Since this morning</h3><p class="s-notebook-caption">These pages change with the life you lead.</p>${game.journal
     .slice()
     .reverse()
     .map((e) => `<article class="s-memory"><h4>${esc(e.title)}</h4><p>${esc(e.text)}</p></article>`)

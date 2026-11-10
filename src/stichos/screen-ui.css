@@ -5,6 +5,32 @@
   --v-slate: #172b36;
   --v-bronze: #bca36c;
 }
+/* The title promises the same gathering, workshops and exploration found in play. */
+.s-modal.is-title {
+  background:
+    linear-gradient(90deg, #091723bb, #09172344),
+    url('./assets/frontier-title.webp') center / cover no-repeat;
+}
+.v-title-loop {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding: 0;
+  list-style: none;
+  color: #ecd5a5;
+  font-size: 12px;
+}
+.v-title-loop li {
+  padding: 6px 9px;
+  background: #0e2029d9;
+  border: 1px solid #69766c;
+}
+.v-work-budget {
+  display: block;
+  font-size: 12px;
+  line-height: 1.5;
+  color: #e1c697;
+}
 [hidden] {
   display: none !important;
 }

@@ -1820,6 +1820,12 @@ export class Stichos {
                 ? 'ready'
                 : 'idle',
         progress: s.job && recipe ? s.job.elapsed / recipe.seconds : 0,
+        totalProgress:
+          s.job && recipe ? (s.job.completed + s.job.elapsed / recipe.seconds) / s.job.batches : 0,
+        remainingSeconds:
+          s.job && recipe
+            ? Math.max(0, (s.job.batches - s.job.completed) * recipe.seconds - s.job.elapsed)
+            : 0,
       };
     });
   }
@@ -1867,6 +1873,7 @@ export class Stichos {
       definition: definition ?? null,
     });
     if (!definition || !valid) return fail('Choose a valid production structure and world tile.');
+    if (this.spaceId !== 'surface') return fail('Return to the surface to build a work platform.');
     if (this.phase !== 'playing' || this.nearbyThreat()) return fail('Build while safe and awake.');
     if (distance(this.player, place) > 2)
       return fail('Stand within two paces of the marked work platform.');
@@ -1899,6 +1906,7 @@ export class Stichos {
       kind,
       ...preview.point,
       createdAt: this.time,
+      sharedRegistration: this.sharedWorld,
       output: {},
       job: null,
     };
@@ -1938,7 +1946,7 @@ export class Stichos {
       });
     if (!s || !recipe || !Number.isInteger(batches) || batches < 1 || batches > 5)
       return fail('Choose one to five batches from this structure’s recipes.');
-    if (this.phase !== 'playing' || distance(this.player, s) > 3)
+    if (this.spaceId !== 'surface' || this.phase !== 'playing' || distance(this.player, s) > 3)
       return fail('Load inputs beside the actual structure.');
     if (s.job) return fail('Finish or cancel the current job first.');
     if (this.production.jobSerial >= 1000000) return fail('The production ledger is full.');
@@ -2006,19 +2014,28 @@ export class Stichos {
     delete job.awaitingClaim;
     delete job.blocked;
     if (job.completed === job.batches) s.job = null;
-    if (distance(s, this.player) < 22) this.effect('harvest', s, '#b8d6a1', 0.8);
+    if (this.spaceId === 'surface' && distance(s, this.player) < 22)
+      this.effect('harvest', s, '#b8d6a1', 0.8);
     this.event('harvest', `${recipe.name}: one completed batch is stored at the platform.`);
     return true;
   }
   private updateProduction(dt: number) {
     for (const s of this.production.structures) {
-      const job = s.job;
-      if (!job || job.blocked || job.awaitingClaim) continue;
-      const recipe = PRODUCTION_RECIPES.find((r) => r.id === job.recipe)!;
-      job.elapsed = Math.min(recipe.seconds, job.elapsed + dt);
-      if (job.elapsed >= recipe.seconds) {
-        if (recipe.source && this.sharedWorld) job.awaitingClaim = true;
-        else this.finishProductionBatch(s);
+      let remaining = dt;
+      while (s.job && remaining > 0) {
+        const job = s.job;
+        if (job.blocked || job.awaitingClaim) break;
+        const recipe = PRODUCTION_RECIPES.find((r) => r.id === job.recipe)!;
+        const advance = Math.min(remaining, recipe.seconds - job.elapsed);
+        job.elapsed += advance;
+        remaining -= advance;
+        if (job.elapsed + 1e-8 < recipe.seconds) break;
+        job.elapsed = recipe.seconds;
+        if (recipe.source && this.sharedWorld) {
+          job.awaitingClaim = true;
+          break;
+        }
+        if (!this.finishProductionBatch(s)) break;
       }
     }
   }
@@ -2073,7 +2090,13 @@ export class Stichos {
   retryProduction(id: string) {
     const s = this.production.structures.find((s) => s.id === id),
       job = s?.job;
-    if (!s || !job?.blocked || distance(s, this.player) > 3)
+    if (
+      this.spaceId !== 'surface' ||
+      this.phase !== 'playing' ||
+      !s ||
+      !job?.blocked ||
+      distance(s, this.player) > 3
+    )
       return { ok: false, message: 'Inspect the blocked production platform nearby.' };
     if (job.sources[job.completed] && this.removed.has(job.sources[job.completed].id))
       return { ok: false, message: 'The source is gone. Cancel and load a new resource.' };
@@ -2088,6 +2111,7 @@ export class Stichos {
       !s ||
       !job ||
       !recipe ||
+      this.spaceId !== 'surface' ||
       this.phase !== 'playing' ||
       distance(s, this.player) > 3 ||
       (job.awaitingClaim && this.sharedWorld)
@@ -2106,7 +2130,12 @@ export class Stichos {
   }
   collectProduction(id: string) {
     const s = this.production.structures.find((s) => s.id === id);
-    if (!s || this.phase !== 'playing' || distance(s, this.player) > 3)
+    if (
+      !s ||
+      this.spaceId !== 'surface' ||
+      this.phase !== 'playing' ||
+      distance(s, this.player) > 3
+    )
       return { ok: false, message: 'Collect output beside the actual platform.' };
     if (!Object.values(s.output).some((n) => n && n > 0))
       return { ok: false, message: 'No completed output is waiting.' };
@@ -2116,6 +2145,56 @@ export class Stichos {
     s.output = {};
     grantPractice(this.progression, 'crafting', 2);
     return { ok: true, message: `Retrieved ${this.costText(output)}.`, output };
+  }
+  dismantleProductionPreview(id: string) {
+    const structure = this.production.structures.find((s) => s.id === id);
+    const definition = PRODUCTION_KINDS.find((kind) => kind.id === structure?.kind);
+    const salvage = Object.fromEntries(
+      Object.entries(definition?.items ?? {})
+        .map(([item, amount]) => [item, Math.floor(amount! / 2)])
+        .filter(([, amount]) => Number(amount) > 0),
+    ) as Partial<Record<ItemId, number>>;
+    const result = (ok: boolean, message: string) => ({ ok, message, salvage });
+    if (!structure || !definition) return result(false, 'This work platform no longer exists.');
+    if (this.sharedWorld || structure.sharedRegistration)
+      return result(
+        false,
+        'Shared-world platforms cannot be dismantled until the room supports their removal.',
+      );
+    if (
+      this.spaceId !== 'surface' ||
+      this.phase !== 'playing' ||
+      distance(this.player, structure) > 3
+    )
+      return result(false, 'Stand beside the surface platform to dismantle it.');
+    if (this.nearbyThreat()) return result(false, 'Dismantle the platform when the area is safe.');
+    if (structure.job) return result(false, 'Finish or cancel the current job before dismantling.');
+    if (Object.values(structure.output).some((amount) => amount && amount > 0))
+      return result(false, 'Collect the stored output before dismantling.');
+    if (
+      this.carried + Object.values(salvage).reduce((sum, amount) => sum + (amount ?? 0), 0) >
+      this.capacity
+    )
+      return result(false, 'Make room for the salvaged construction materials.');
+    return result(
+      true,
+      `Dismantle for ${this.costText(salvage)}. Construction coins are not returned.`,
+    );
+  }
+  dismantleProduction(id: string) {
+    const preview = this.dismantleProductionPreview(id);
+    if (!preview.ok) return preview;
+    if (!this.gain(preview.salvage))
+      return {
+        ...preview,
+        ok: false,
+        message: 'Make room for the salvaged construction materials.',
+      };
+    this.production.structures = this.production.structures.filter((s) => s.id !== id);
+    return {
+      ...preview,
+      message: `Platform dismantled. Recovered ${this.costText(preview.salvage)}; the work site is free.`,
+    };
   }
   get explorationRevision() {
     return this.knowledgeRevision;
@@ -2488,6 +2567,8 @@ export class Stichos {
   }
   setSharedWorld(active: boolean) {
     this.sharedWorld = active;
+    if (active)
+      for (const structure of this.production.structures) structure.sharedRegistration = true;
   }
   get laborOrders() {
     return clone(this.orders);
@@ -2512,6 +2593,7 @@ export class Stichos {
         reason: 'Collective resource orders require a solo world.',
       };
     if (
+      this.spaceId !== 'surface' ||
       this.phase !== 'playing' ||
       !worker ||
       !this.householdWorkerIds.includes(workerId) ||
@@ -2540,6 +2622,7 @@ export class Stichos {
       props: this.world.propsAround(worker.x, worker.y, 24),
       removed: this.removed,
       orders: this.orders,
+      reserved: this.productionReservations(),
       now: this.time,
       serial: this.laborSerial + 1,
       coins: this.player.coins,
@@ -2586,6 +2669,7 @@ export class Stichos {
     const order = this.orders.find((o) => o.id === orderId),
       worker = order && this.laborWorker(order.workerId);
     if (
+      this.spaceId !== 'surface' ||
       this.phase !== 'playing' ||
       !order ||
       !worker ||
@@ -4148,10 +4232,10 @@ export class Stichos {
         { active: new Set(this.npcs.map((n) => n.id)) },
       );
     this.updateNpcs(dt);
-    if (this.spaceId === 'surface') {
-      this.updateLabor(dt);
-      this.updateProduction(dt);
-    }
+    if (this.spaceId === 'surface') this.updateLabor(dt);
+    // Prepaid platforms keep working while their owner explores underground.
+    // Their finite surface sources remain authoritative in either space.
+    this.updateProduction(dt);
     this.updateArrows(dt);
     this.updateSharedProjectiles(dt);
     for (const effect of this.effects) effect.age += dt;
@@ -4490,10 +4574,12 @@ export class Stichos {
         }
         continue;
       }
-      const kind = npc.appearance.weapon === 'none' ? 'staff' : npc.appearance.weapon;
+      const kind = npc.appearance.weapon;
       const profile =
         npc.hostile && range < 8
-          ? generatedWeaponProfile(npc.appearance.weaponSeed ?? npc.appearance.seed, kind, 1)
+          ? kind === 'none'
+            ? { damage: 8, range: 1.15, cooldown: 0.7, color: npc.appearance.skin }
+            : generatedWeaponProfile(npc.appearance.weaponSeed ?? npc.appearance.seed, kind, 1)
           : null;
       const reach = profile ? profile.range * 0.78 : 0;
       const canAim = !!profile && range <= reach && this.lineOfSight(npc, this.player);
@@ -4512,7 +4598,7 @@ export class Stichos {
         this.enemyIntents.set(npc.id, {
           remaining: windup,
           heading: npc.heading,
-          kind,
+          kind: kind === 'none' ? 'sword' : kind,
           damage: clamp(Math.round(profile!.damage * (npc.role === 'raider' ? 0.31 : 0.25)), 5, 10),
           range: reach,
           color: profile!.color,
@@ -6668,7 +6754,14 @@ export class Stichos {
       return;
     }
     const p = this.player;
-    if (this.phase !== 'playing' || this.dialogue || p.wardCooldown > 0 || p.stamina < 30) return;
+    if (
+      this.phase !== 'playing' ||
+      this.dialogue ||
+      this.preparing ||
+      p.wardCooldown > 0 ||
+      p.stamina < 30
+    )
+      return;
     p.stamina -= 30;
     p.wardCooldown = 8;
     this.effect('ward', p, '#9abde9', 0.75);
@@ -6697,10 +6790,13 @@ export class Stichos {
   private updateArrows(dt: number) {
     for (const arrow of this.arrows) {
       if (arrow.effect.age >= arrow.effect.duration) continue;
-      const count = Math.max(1, Math.ceil((Math.hypot(arrow.vx, arrow.vy) * dt) / 0.12));
+      // Visual lifetime is also the projectile's exact range budget. The final
+      // simulation slice must not travel a whole frame past the advertised reach.
+      const travelTime = Math.min(dt, arrow.effect.duration - arrow.effect.age);
+      const count = Math.max(1, Math.ceil((Math.hypot(arrow.vx, arrow.vy) * travelTime) / 0.12));
       for (let i = 0; i < count; i++) {
-        arrow.effect.x += (arrow.vx * dt) / count;
-        arrow.effect.y += (arrow.vy * dt) / count;
+        arrow.effect.x += (arrow.vx * travelTime) / count;
+        arrow.effect.y += (arrow.vy * travelTime) / count;
         if (this.world.blocked(arrow.effect.x, arrow.effect.y, this.removed)) {
           arrow.effect.age = arrow.effect.duration;
           break;
@@ -7158,6 +7254,12 @@ export class Stichos {
     this.dialogue = null;
     this.arrows = [];
     this.currentWork = null;
+    // A body transition ends its physical action; the next resident must not
+    // inherit an unfinished dash, windup, or momentum bonus from another body.
+    this.preparing = null;
+    this.stepping = null;
+    this.momentumUntil = 0;
+    this.presentationCues = [];
     this.enemyIntents.clear();
     this.effects = [];
     this.refreshNpcs();
@@ -7550,6 +7652,9 @@ export class Stichos {
     }
     game.production = restoreProduction(data.production, data.time);
     for (const structure of game.production.structures) {
+      // Older saves did not record authority registration. A remembered room
+      // can still own this platform after disconnect, so retain it conservatively.
+      structure.sharedRegistration ??= !!data.sharedCombatLedger?.room;
       for (let y = -1; y <= 1; y++)
         for (let x = -1; x <= 1; x++) {
           const tile = game.world.tile(structure.x + x, structure.y + y);

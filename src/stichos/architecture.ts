@@ -63,14 +63,18 @@ export function makeRegionalBuilding(
   const w = columns * 32,
     h = rows * 32,
     x = 36,
-    y = 194,
+    // A long nave raises the central gable; reserve that rise above the footprint.
+    y =
+      kind === 'church' || kind === 'hall'
+        ? Math.max(194, Math.ceil((h - g.facade + 22) * 0.7) + 40)
+        : 194,
     front = y + h,
     mid = x + w / 2,
     eave = front - g.facade - g.raised,
     back = y - 22;
   const image = document.createElement('canvas');
   image.width = w + 72;
-  image.height = h + 224;
+  image.height = h + y + 30;
   const c = image.getContext('2d')!;
   c.imageSmoothingEnabled = false;
   const mix = (a: string, b: string, t: number) => {
@@ -1404,5 +1408,5 @@ export function makeRegionalBuilding(
       }
     }
   }
-  return { image, x: 36, y: 194 };
+  return { image, x: 36, y };
 }
