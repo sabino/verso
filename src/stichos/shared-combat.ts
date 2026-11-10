@@ -905,6 +905,8 @@ export class SharedCombat {
     // A room has at most eight players; abandoned identities cannot grow this cache forever.
     if (!this.cooldowns.has(peer.id) && this.cooldowns.size >= 64)
       return this.result(false, 'Too many combat identities in this room.');
+    if (kind === 'attack' && profile.delivery === 'projectile' && this.projectiles.length >= 128)
+      return this.result(false, 'Too many projectiles.');
     cooldown[kind] = now + (kind === 'ward' ? 8000 : profile.cooldown * 1000);
     this.cooldowns.set(peer.id, cooldown);
     for (const npc of this.enemiesAround(peer.x, peer.y, 16)) this.load(npc);
@@ -912,7 +914,6 @@ export class SharedCombat {
     const color = kind === 'ward' ? '#9abde9' : profile.color;
     const strikeId = ++this.serial;
     if (kind === 'attack' && profile.delivery === 'projectile') {
-      if (this.projectiles.length >= 128) return this.result(false, 'Too many projectiles.');
       this.projectiles.push({
         id: strikeId,
         actorId: peer.id,
@@ -1206,11 +1207,17 @@ export class SharedCombat {
         delete npc.intent;
         continue;
       }
-      const target = npc.hostile
+      const targets = npc.hostile
         ? this.peers
             .filter((p) => distance(npc, p) < 8)
-            .sort((a, b) => distance(npc, a) - distance(npc, b) || a.id.localeCompare(b.id))[0]
-        : undefined;
+            .sort((a, b) => distance(npc, a) - distance(npc, b) || a.id.localeCompare(b.id))
+        : [];
+      // A sheltered near player must not distract a foe from a visible teammate.
+      // Avoid extra raycasts in the common one-player case.
+      const target =
+        targets.length > 1
+          ? (targets.find((p) => this.lineOfSight(npc, p)) ?? targets[0])
+          : targets[0];
       const special = encounterPattern(
         npc.id,
         npc.seed,

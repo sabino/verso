@@ -356,6 +356,8 @@ export interface WeaponPixels {
   height: number;
   pixels: Uint8Array;
   palette: string[];
+  /** The manufactured grip joint, in this raster's coordinates. */
+  grip: { x: number; y: number };
 }
 /** Connected structural mask, constrained growth, edge shading, and a small coherent palette.
  * Conceptual references: SnoopethDuckDuck's Staff/Sword Maker and Deep-Fold's SpriteGenerator.
@@ -412,6 +414,7 @@ export function weaponPixels(g: WeaponGenome): WeaponPixels {
   };
   const top = 59 - g.length,
     p = g.parts;
+  let gripPoint = { x: 16, y: 50 };
   const grip = (x: number, a: number, b: number, width = 3) => {
     stroke(x, a, x, b, p.grip === 'bare' ? 14 : 11, width);
     if (p.grip !== 'bare')
@@ -430,6 +433,7 @@ export function weaponPixels(g: WeaponGenome): WeaponPixels {
       } as Record<string, string>
     )[g.subtype] ?? g.subtype;
   if (g.technology === 3 && g.kind === 'bow') {
+    gripPoint = { x: 16, y: 49 };
     const barrel = g.subtype === 'rail carbine' ? top : top + 6,
       end = g.subtype === 'pulse thrower' ? 36 : 30;
     stroke(14, barrel, 14, 43, 6, 5);
@@ -455,6 +459,7 @@ export function weaponPixels(g: WeaponGenome): WeaponPixels {
     stroke(14, 44, 11, 49, 6);
     stroke(11, 49, 16, 49, 6);
   } else if (g.technology === 2 && g.kind === 'bow') {
+    gripPoint = { x: 16, y: 49 };
     const cy = top + 10,
       span = 10 + g.crown;
     stroke(14, top + 4, 14, 57, 3, 4);
@@ -470,6 +475,7 @@ export function weaponPixels(g: WeaponGenome): WeaponPixels {
     stroke(17, 47, 22, 47, 6);
     stroke(22, 47, 18, 52, 6);
   } else if (g.technology === 3 && g.kind === 'staff') {
+    gripPoint = { x: 16, y: 48 };
     const instrument = g.subtype === 'resonance baton' ? top + 9 : top;
     stroke(15, instrument, 15, 59, 6, 3);
     grip(14, 44, 53, 4);
@@ -561,12 +567,11 @@ export function weaponPixels(g: WeaponGenome): WeaponPixels {
     }
     const endX = g.subtype === 'reflex bow' ? 11 : 11;
     stroke(endX, top, endX, 59, 7);
-    grip(
-      Math.round(11 + bend + (g.subtype === 'recurve bow' ? 3 : 0)),
-      Math.round(mid - 3),
-      Math.round(mid + 3),
-      2,
-    );
+    gripPoint = {
+      x: Math.round(11 + bend + (g.subtype === 'recurve bow' ? 3 : 0)),
+      y: Math.round(mid),
+    };
+    grip(gripPoint.x, Math.round(mid - 3), Math.round(mid + 3), 2);
     // Bind the grip to the actual central limb even on recurved profiles.
     stroke(11 + bend, mid, 11 + bend + (g.subtype === 'recurve bow' ? 3 : 0), mid, 11, 2);
     if (p.exposedCore) set(12 + bend, mid, 9);
@@ -586,6 +591,7 @@ export function weaponPixels(g: WeaponGenome): WeaponPixels {
       prev = { x, y };
     }
     stroke(center(57), 57, center(59), 59, 6, 2);
+    gripPoint = { x: Math.round(center(46)) + 1, y: 46 };
     grip(Math.round(center(46)), 42, 49, g.breadth > 3 ? 3 : 2);
     stroke(center(42), 42, center(49), 49, p.grip === 'bare' ? 14 : 11, 2);
     if (g.subtype === 'walking pole') stroke(15, top, 15, neck, 3, 2);
@@ -623,7 +629,7 @@ export function weaponPixels(g: WeaponGenome): WeaponPixels {
         for (const d of [-w, -1, 1, w]) if (!pixels[y * w + x + d]) out[y * w + x + d] = 1;
         if (pixels[y * w + x] === 3 && rng() > 0.82) out[y * w + x] = 4;
       }
-  return { width: w, height: h, pixels: out, palette: [...g.palette] };
+  return { width: w, height: h, pixels: out, palette: [...g.palette], grip: gripPoint };
 }
 const sprites = new Map<string, WeaponPixels>();
 export function cachedWeaponPixels(seed: number, kind: WeaponKind) {
@@ -672,7 +678,7 @@ export function drawWeapon(
       const c = sprite.pixels[row * sprite.width + col];
       if (c) {
         ctx.fillStyle = sprite.palette[c];
-        ctx.fillRect(col - 16, row - 46, 1, 1);
+        ctx.fillRect(col - sprite.grip.x, row - sprite.grip.y, 1, 1);
       }
     }
   ctx.restore();

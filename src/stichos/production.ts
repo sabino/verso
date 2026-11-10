@@ -88,6 +88,8 @@ export interface ProductionStructure extends Point {
   id: string;
   kind: ProductionKind;
   createdAt: number;
+  /** Shared authority has no removal protocol yet; never orphan a registered platform. */
+  sharedRegistration?: boolean;
   output: Partial<Record<ItemId, number>>;
   job: ProductionJob | null;
 }
@@ -150,6 +152,7 @@ export function restoreProduction(value: unknown, time: number): ProductionState
       !integer(s.x, -10000000, 10000000) ||
       !integer(s.y, -10000000, 10000000) ||
       !finite(s.createdAt, 0, time) ||
+      (s.sharedRegistration !== undefined && typeof s.sharedRegistration !== 'boolean') ||
       !object(s.output) ||
       Object.entries(s.output).some(
         ([k, n]) => !itemIds.includes(k as ItemId) || !integer(n, 0, 60),

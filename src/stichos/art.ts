@@ -15,7 +15,7 @@ import type {
   TreeForm,
   RockMaterial,
 } from './types.ts';
-import { drawWeapon, weaponGenome } from './equipment.ts';
+import { drawWeapon } from './equipment.ts';
 import { drawArtifact } from './artifact-art.ts';
 import { humanoidGenome, tailoringGenome } from './humanoid-genome.ts';
 import { drawLaborTool } from './labor-art.ts';
@@ -68,7 +68,7 @@ export function line(
   fill: string,
   width = 1,
 ) {
-  const steps = Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0), 1);
+  const steps = Math.max(Math.ceil(Math.max(Math.abs(x1 - x0), Math.abs(y1 - y0))), 1);
   for (let i = 0; i <= steps; i++)
     rect(ctx, x0 + ((x1 - x0) * i) / steps, y0 + ((y1 - y0) * i) / steps, width, width, fill);
 }
@@ -845,9 +845,11 @@ export class StichosArt {
         `regional-door:${seed}:${opened}:${culture.wallColor}:${culture.accentColor}`,
         () =>
           image(
-            42,
-            62,
+            58,
+            64,
             (ctx) => {
+              // Open panels extend past the jambs; keep their complete pixels and ground anchor.
+              ctx.translate(8, 0);
               const rim = color(culture.wallColor, -28),
                 metal = color(culture.wallColor, -9),
                 accent = color(culture.accentColor, 32);
@@ -871,7 +873,7 @@ export class StichosArt {
               rect(ctx, 14, 5, 14, 1, accent);
               rect(ctx, 1, 60, 40, 2, color(metal, 15));
             },
-            21,
+            29,
             61,
           ),
       );
@@ -1299,11 +1301,11 @@ export class StichosArt {
 
   private pine(rng: () => number): Sprite {
     return image(
-      128,
-      180,
+      192,
+      224,
       (ctx) => {
-        const foot = 168,
-          cx = 64 + (rng() - 0.5) * 8,
+        const foot = 208,
+          cx = 96 + (rng() - 0.5) * 8,
           lean = (rng() - 0.5) * 17,
           type = Math.floor(rng() * 3);
         const spread = type === 0 ? 0.8 : type === 1 ? 1 : 1.08,
@@ -1407,8 +1409,8 @@ export class StichosArt {
         line(ctx, apexX, apexY + 7, apexX - 4, apexY + 12, '#adc5df', 2);
         rect(ctx, apexX - 1, apexY, 2, 7, '#e0e9f2');
       },
-      64,
-      168,
+      96,
+      208,
     );
   }
 
@@ -1651,8 +1653,11 @@ function drawHumanoidParts(
     strength = motion.strength;
   const handPose = (s: number, front: boolean) => {
     const ax = side ? east * (front ? 5 : -4) : s * (anatomy.shoulders + 1);
-    let hx = ax + 1,
-      hy = -14 + (moving ? step * s * 2 : 0);
+    let hx = ax + 1 + (!motion.kind && front ? attack * 5 : 0),
+      hy =
+        -14 +
+        (moving ? step * s * 2 : 0) -
+        (!motion.kind && front ? 8 * Math.sin(attack * Math.PI) : 0);
     if (motion.kind === 'gather') {
       hx += strength * (side ? east * (front ? 3 : 8) : front ? -2 : 3);
       hy += strength * (front ? 4 : 10 - motion.settle * 10);
@@ -1674,9 +1679,7 @@ function drawHumanoidParts(
     return { x: hx, y: hy };
   };
   const arm = (s: number, front: boolean) => {
-    const ax = side ? east * (front ? 5 : -4) : s * (anatomy.shoulders + 1),
-      sway = moving ? step * s * 2 : 0,
-      lift = attack > 0 && front ? -8 * Math.sin(attack * Math.PI) : 0;
+    const ax = side ? east * (front ? 5 : -4) : s * (anatomy.shoulders + 1);
     if (motion.kind) {
       const hand = handPose(s, front);
       const elbowX = ax + (side ? east * 2 : s * 2),
@@ -1696,56 +1699,40 @@ function drawHumanoidParts(
       }
       return;
     }
-    line(
-      ctx,
-      ax,
-      -25 - bob,
-      ax + (front ? attack * 5 : 0),
-      -16 + sway + lift,
-      color(sleeve, front ? 9 : -15),
-      3,
-    );
-    rect(ctx, ax, -15 + sway + lift, 3, 3, look.skin);
-    rect(ctx, ax, -16 - anatomy.cuff + sway + lift, 3, anatomy.cuff, color(look.trim, -10));
+    const hand = handPose(s, front);
+    line(ctx, ax, -25 - bob, hand.x - 1, hand.y - 2, color(sleeve, front ? 9 : -15), 3);
+    rect(ctx, hand.x - 1, hand.y - 1, 3, 3, look.skin);
+    rect(ctx, hand.x - 1, hand.y - 2 - anatomy.cuff, 3, anatomy.cuff, color(look.trim, -10));
   };
   const heldArmAndItem = () => {
     arm(1, true);
-    const held = motion.kind ? handPose(1, true) : null;
-    const wx = held ? held.x : side ? east * 7 : 8,
-      hand = held ? held.y : -14 + step * 2 - attack * 7;
+    // The forearm, palm and item share one grip point throughout the gait and strike.
+    const held = handPose(1, true),
+      wx = held.x,
+      hand = held.y;
     const workTool = motion.kind === 'gather' ? action?.tool : undefined;
     if (workTool || look.weapon !== 'none') {
       const sign = side ? east : 1;
-      const angle =
-        (workTool ? sign * (-0.85 + strength * 1.4) : 0) +
-        (motion.kind === 'gather' && !workTool ? sign * strength * 0.22 : 0) +
-        (look.weapon === 'sword'
-          ? sign * (0.16 + attack * 1.12)
-          : look.weapon === 'bow'
-            ? sign * attack * 0.3
-            : sign * (0.04 + attack * 0.7));
+      const angle = workTool
+        ? sign * (-0.85 + strength * 1.4)
+        : (motion.kind === 'gather' ? sign * strength * 0.22 : 0) +
+          (look.weapon === 'sword'
+            ? sign * (0.16 + attack * 1.12)
+            : look.weapon === 'bow'
+              ? sign * attack * 0.3
+              : sign * (0.04 + attack * 0.7));
       const weaponScale = look.weapon === 'bow' ? 0.62 : 0.68;
       const weaponSeed = look.weaponSeed ?? look.seed;
-      const bow =
-        !look.artifactDesign && look.weapon === 'bow' ? weaponGenome(weaponSeed, 'bow') : null;
       ctx.save();
-      ctx.translate(wx + sign * attack * 4, hand);
+      ctx.translate(wx, hand);
       ctx.rotate(angle);
       if (side && east < 0) ctx.scale(-1, 1);
-      if (workTool && !look.artifactDesign) drawLaborTool(ctx, workTool, 0, 0, 0.85);
+      if (workTool) drawLaborTool(ctx, workTool, 0, 0, 0.85);
       else if (look.artifactDesign) drawArtifact(ctx, look.artifactDesign, 0, 0, weaponScale);
-      else if (look.weapon !== 'none')
-        drawWeapon(
-          ctx,
-          weaponSeed,
-          look.weapon,
-          bow ? -(2 + bow.breadth) * weaponScale : 0,
-          bow ? -(13 - bow.length / 2) * weaponScale : 0,
-          weaponScale,
-        );
+      else if (look.weapon !== 'none') drawWeapon(ctx, weaponSeed, look.weapon, 0, 0, weaponScale);
       ctx.restore();
       // A visible gripping hand belongs to the articulated body, over its generated handle.
-      rect(ctx, wx + sign * attack * 4, hand, 2, 2, look.skin);
+      rect(ctx, wx, hand, 2, 2, look.skin);
     }
   };
   // Sole, trouser folds, two distinct feet, and the visible rear hand.

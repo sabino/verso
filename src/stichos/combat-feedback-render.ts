@@ -1,5 +1,6 @@
 import type { Point } from './types.ts';
 import type { CombatCue, CombatFeedback } from './combat-feedback.ts';
+import { drawGeneratedEffect } from './effect-atlas.ts';
 
 type Project = (point: Point) => Point;
 const TAU = Math.PI * 2;
@@ -107,6 +108,7 @@ function drawCue(
   const decorative = !reduced && intensity > 0;
   ctx.save();
   ctx.translate(Math.round(p.x), Math.round(p.y - unit * 0.35));
+  drawGeneratedEffect(ctx, cue, unit, feedback.settings);
   ctx.fillStyle = cue.color ?? '#dedac5';
   ctx.strokeStyle = cue.color ?? '#dedac5';
   ctx.globalAlpha = Math.min(1, (1 - t) * 1.5);

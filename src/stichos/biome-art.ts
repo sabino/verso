@@ -422,7 +422,8 @@ export function makeRegionalTree(form: TreeForm, seed: number): Sprite {
     };
     if (form === 'conifer') {
       for (let i = 0; i < 8; i++) {
-        const yy = foot - g.height + i * 12,
+        // Short conifers need compressed tiers, otherwise their lower crown sinks below the roots.
+        const yy = foot - g.height + (i / 7) * (g.height - 28),
           span = 6 + i * 5;
         clump(x, yy + 8, span, 13);
       }

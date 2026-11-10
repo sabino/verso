@@ -262,6 +262,7 @@ export function assignLabor(input: {
   kind: LaborKind;
   props: readonly Prop[];
   removed: ReadonlySet<string>;
+  reserved?: ReadonlySet<string>;
   orders: readonly LaborOrder[];
   now: number;
   serial: number;
@@ -297,6 +298,7 @@ export function assignLabor(input: {
       (p) =>
         matching(kind, p) &&
         !removed.has(p.id) &&
+        !input.reserved?.has(p.id) &&
         !reserved.has(p.id) &&
         Math.hypot(p.x - worker.x, p.y - worker.y) <= 24,
     )

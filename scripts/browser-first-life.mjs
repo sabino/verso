@@ -137,7 +137,36 @@ export async function verifyFirstLife({ endpoint, url, out }) {
     await page.wait("document.querySelector('#s-quest-stage')?.textContent === 'Keep a promise'");
     assert.ok((await page.state()).personalStory.relationships.some((r) => r.trusted));
     screenshots.push(await page.shot('choice-consequence'));
-    await page.click('#s-dialogue-close');
+    assert.equal(
+      await page.read(
+        "!!document.querySelector('[data-choice=close]') && !document.querySelector('[data-choice=close]').closest('details')",
+      ),
+      true,
+      'the Continue action remains visible after a consequential response',
+    );
+    assert.equal(
+      await page.read("!!document.querySelector('.s-dialogue-more')"),
+      false,
+      'a response with no optional actions has no empty disclosure',
+    );
+    await page.click('[data-choice=close]');
+    await page.key('q', 'KeyQ', 81);
+    await page.wait(
+      "performance.getEntriesByType('resource').some(r => r.name.includes('impact-atlas') && r.responseEnd > 0)",
+      'the bundled generated effect atlas loads during actual play',
+    );
+    screenshots.push(await page.shot('botanical-effect'));
+    await page.click('#v-work');
+    await page.wait("window.stichos.state.modal==='production'");
+    assert.equal(
+      await page.read(
+        "Array.from(document.querySelectorAll('[data-build-kind]')).filter(b => b.disabled).every(b => b.parentElement.querySelector('.v-work-budget')?.textContent.length > 0)",
+      ),
+      true,
+      'unavailable construction has a visible reason',
+    );
+    screenshots.push(await page.shot('work-requirements'));
+    await page.click('#v-work-close');
     const result = {
       seed: initial.seed,
       lifeIndex: initial.lifeOrigin.index,
@@ -161,6 +190,14 @@ export async function verifyFirstLife({ endpoint, url, out }) {
     result.screenshots.push(await mobile.shot('arrival'));
     await mobile.click('#s-mobile-thread');
     await mobile.wait("window.stichos.state.modal==='journal'");
+    assert.equal(
+      await mobile.read(
+        "document.querySelector('[aria-label=\"Current objective\"]')?.textContent.includes('Hear the people involved')",
+      ),
+      true,
+      'the phone journal preserves the live next step',
+    );
+    result.screenshots.push(await mobile.shot('current-objective'));
     assert.deepEqual(harness.errors, []);
     fs.writeFileSync(path.join(out, 'first-life-results.json'), JSON.stringify(result, null, 2));
     return result;

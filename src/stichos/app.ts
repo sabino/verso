@@ -52,6 +52,7 @@ import { claimLifeTab, releaseLifeTab } from './life-lease';
 import { mountLife } from './life';
 import { MultiplayerConnection, getBrowserPlayerId, savedWorlds } from './multiplayer';
 import { PRODUCTION_KINDS, type ProductionKind } from './production';
+import { professionProfile } from './progression.ts';
 import { notebookHtml, notebookLeafCount } from './notebook';
 import type { NotebookSection, NotebookView } from './notebook';
 import { INTRO_BEATS, JOURNAL_ENTRIES, PLANT_NOTES } from './lore';
@@ -227,6 +228,9 @@ function trackedQuest() {
       complete: false,
       stage: 0,
     };
+  // A finished explicit quest must not permanently hide the resident's next step.
+  if (trackedQuestId && !game.quests.some((q) => q.id === trackedQuestId && !q.complete))
+    trackedQuestId = null;
   if (game.universeLife && !trackedQuestId && game.personalStory)
     return personalThread(game.personalStory, game.inventory, game.freeLife.contract);
   const active = game.quests.filter((q) => !q.complete);
@@ -802,7 +806,7 @@ function title() {
   const invite = pendingInvitation;
   openModal(
     'title',
-    `<div class="v-window-heading"><div class="s-title-mark">VERSO</div><button id="v-install-title">Install app</button></div><h2>One universe.<br>A life of your own.</h2><p>Work the land. Build a livelihood. Find other minds among the stars. Every world has an address; every life leaves something behind.</p>${invite ? `<div class="v-incoming"><b>Invitation to room ${esc(invite.room)}</b><span>${esc(planetAt(invite.seed).name)} · your friend’s planet is already selected</span><button id="v-join-invite" class="s-primary">Join this world</button></div>` : ''}${stored ? '<button id="s-continue" class="s-primary s-continue">Continue this life</button>' : ''}<div class="v-entry-columns"><form id="s-start"><label>Planet seed <span>Leave blank for a new signal</span><input id="s-seed-input" value="" maxlength="64" aria-label="World seed" placeholder="A name, number, or leave to chance"></label><button class="s-primary" type="submit">Choose a life</button><button id="v-theo-story" type="button">Theo Bishop’s story · Stíchos</button></form><form id="v-title-room"><label>Join friends<input id="v-title-code" maxlength="600" placeholder="Complete room code or invitation link" autocapitalize="characters" autocomplete="off"></label><button type="submit">Find room</button><p id="v-title-room-error" class="v-room-error" role="alert" hidden></p><button id="v-title-galaxy" type="button">Browse the galaxy</button></form></div><p class="s-title-foot">Your continuing life is kept in this browser. Share a room link to bring friends to the same world.</p>`,
+    `<div class="v-window-heading"><div class="s-title-mark">VERSO</div><button id="v-install-title">Install app</button></div><h2>One universe.<br>A life of your own.</h2><p>Gather supplies, build a working homestead, and take on the wilderness. Begin with a resident’s unfinished promise; grow from hand tools to production and field expeditions.</p><ol class="v-title-loop" aria-label="Your path"><li>1 · Meet your people</li><li>2 · Gather & build</li><li>3 · Explore & fight</li></ol>${invite ? `<div class="v-incoming"><b>Invitation to room ${esc(invite.room)}</b><span>${esc(planetAt(invite.seed).name)} · your friend’s planet is already selected</span><button id="v-join-invite" class="s-primary">Join this world</button></div>` : ''}${stored ? '<button id="s-continue" class="s-primary s-continue">Continue this life</button>' : ''}<div class="v-entry-columns"><form id="s-start"><label>Planet seed <span>Leave blank for a new signal</span><input id="s-seed-input" value="" maxlength="64" aria-label="World seed" placeholder="A name, number, or leave to chance"></label><button class="s-primary" type="submit">Choose a life</button><button id="v-theo-story" type="button">Theo Bishop’s story · Stíchos</button></form><form id="v-title-room"><label>Join friends<input id="v-title-code" maxlength="600" placeholder="Complete room code or invitation link" autocapitalize="characters" autocomplete="off"></label><button type="submit">Find room</button><p id="v-title-room-error" class="v-room-error" role="alert" hidden></p><button id="v-title-galaxy" type="button">Browse the galaxy</button></form></div><p class="s-title-foot">Your continuing life is kept in this browser. Share a room link to bring friends to the same world.</p>`,
   );
   el('v-install-title').onclick = () => void requestInstall().then(toast);
   el('v-install-title').insertAdjacentHTML(
@@ -1327,8 +1331,9 @@ function soundSettings() {
       )
       .join(
         '',
-      )}</div><div class="s-menu-buttons"><button id="v-audio-enable">${settings.muted ? 'Unmute game sound' : audio.needsGesture ? 'Enable game sound' : 'Mute game sound'}</button><button id="v-audio-preview">Listen to this place</button><button id="v-audio-voice">Nearby voices & microphone</button><button id="v-audio-return" class="s-primary">Return to the world</button></div><details class="v-app-diagnostics"><summary>App & audio diagnostics</summary><p>${esc(mode.label)}<br>${esc(mode.source)}<br>Launch handling: ${mode.launchQueueSupported ? 'supported' : 'unavailable'}${mode.launchObserved ? ' · launch observed' : ''}<br>Viewport: ${mobileViewport.diagnostics.height}px · ${mobileViewport.diagnostics.visualViewport ? 'visual viewport tracked' : 'window size fallback'}<br>Soundscape: ${esc(audio.getDiagnostics().zone)} · ${esc(game.worldTime.label)}</p><p>Browsers cannot reliably tell whether another installation exists. Bluetooth routing and interruptions are controlled by your device.</p><button id="v-settings-install">Install Verso</button></details>`,
+      )}</div><div class="s-menu-buttons"><button id="v-audio-enable">${settings.muted ? 'Unmute game sound' : audio.needsGesture ? 'Enable game sound' : 'Mute game sound'}</button><button id="v-audio-preview">Listen to this place</button><button id="v-audio-voice">Nearby voices & microphone</button><button id="v-audio-return" class="s-primary">Return to the world</button></div><details class="v-app-diagnostics"><summary>App & audio diagnostics</summary><p>${esc(mode.label)}<br>${esc(mode.source)}<br>Launch handling: ${mode.launchQueueSupported ? 'supported' : 'unavailable'}${mode.launchObserved ? ' · launch observed' : ''}<br>Viewport: ${mobileViewport.diagnostics.height}px · ${mobileViewport.diagnostics.visualViewport ? 'visual viewport tracked' : 'window size fallback'}<br>Soundscape: ${esc(audio.getDiagnostics().zone)} · ${esc(game.worldTime.label)}</p><p>Browsers cannot reliably tell whether another installation exists. Bluetooth routing and interruptions are controlled by your device.</p><button id="v-settings-install">Install Verso</button><button id="v-ai">Experimental companion setup</button></details>`,
   );
+  el('v-ai').onclick = aiMenu;
   const revision = modalRevision;
   const settingsPanel = el('s-modal');
   settingsPanel
@@ -1414,7 +1419,7 @@ function pauseMenu() {
   save();
   openModal(
     'pause',
-    `<div class="v-window-heading"><h2>A continuing life</h2><button id="s-resume" aria-label="Resume">×</button></div><p>${esc(game.player.name)} · ${esc(currentPlanet.name)}<br>${Math.floor(game.distanceTraveled)} paces traveled · kept in this browser</p><div class="s-menu-buttons"><button id="v-pause-resume" class="s-primary">Return to the world</button><button id="s-new">Galaxy & other worlds</button><button id="s-pause-life">Home, profession & clothing</button><button id="s-pause-together">Room & friends</button><button id="v-sound-settings">Sound, voice & app settings</button><button id="v-install">Install Verso</button><button id="v-ai">AI companion</button><button id="v-retire">Leave this body</button><button id="s-pause-help">Controls & shortcuts</button></div><p class="v-muted">Leaving a body keeps its belongings and work on this planet. Clearing this browser’s storage loses its local identity and private progress.</p>`,
+    `<div class="v-window-heading"><h2>A continuing life</h2><button id="s-resume" aria-label="Resume">×</button></div><p>${esc(game.player.name)} · ${esc(currentPlanet.name)}<br>${Math.floor(game.distanceTraveled)} paces traveled · kept in this browser</p><div class="s-menu-buttons"><button id="v-pause-resume" class="s-primary">Return to the world</button><button id="s-new">Galaxy & other worlds</button><button id="s-pause-life">Home, profession & clothing</button><button id="s-pause-together">Room & friends</button><button id="v-sound-settings">Sound, voice & app settings</button><button id="v-install">Install Verso</button><button id="v-retire">Leave this body</button><button id="s-pause-help">Controls & shortcuts</button></div><p class="v-muted">Leaving a body keeps its belongings and work on this planet. Clearing this browser’s storage loses its local identity and private progress.</p>`,
   );
   el('s-resume').onclick = closeModal;
   el('v-pause-resume').onclick = closeModal;
@@ -1441,7 +1446,7 @@ function pauseMenu() {
   el('s-pause-together').onclick = togetherMenu;
   el('v-sound-settings').onclick = soundSettings;
   el('v-install').onclick = () => void requestInstall().then(toast);
-  el('v-ai').onclick = aiMenu;
+
   el('v-retire').onclick = () => {
     openModal(
       'retire',
@@ -1933,20 +1938,21 @@ function updateDialogue() {
   const personal = game.personalStory?.relationships.some((person) => person.npcId === d.npcId);
   const choiceButton = (c: (typeof d.choices)[number]) =>
     `<button data-choice="${esc(c.id)}" ${c.disabled ? 'disabled' : ''}>${esc(c.label)}${c.detail ? `<small>${esc(c.detail)}</small>` : ''}</button>`;
+  const optionalChoices = d.choices.filter(
+    (c) => !c.id.startsWith('personal:') && c.id !== 'close',
+  );
   const choices = personal
     ? `${d.choices
-        .filter((c) => c.id.startsWith('personal:'))
+        .filter((c) => c.id.startsWith('personal:') || c.id === 'close')
         .map(choiceButton)
         .join(
           '',
-        )}<details class="s-dialogue-more"><summary>Other ways to talk or trade</summary><div class="s-dialogue-choices">${d.choices
-        .filter((c) => !c.id.startsWith('personal:'))
-        .map(choiceButton)
-        .join('')}</div></details>`
+        )}${optionalChoices.length ? `<details class="s-dialogue-more"><summary>Other ways to talk or trade</summary><div class="s-dialogue-choices">${optionalChoices.map(choiceButton).join('')}</div></details>` : ''}`
     : d.choices.map(choiceButton).join('');
   el('s-dialogue').innerHTML =
     `<section role="dialog" aria-label="Conversation with ${esc(d.speaker)}"><div class="s-dialogue-heading"><div><small>${esc(d.role)}</small><h2>${esc(d.speaker)}</h2></div><button id="s-dialogue-close" aria-label="Close conversation">×</button></div><p>${esc(d.text)}</p><div class="s-dialogue-choices">${choices}</div></section>`;
-  if (d.role === 'merchant' && d.npcId && !personal) {
+  const isMerchant = d.npcId && game.npcs.some((n) => n.id === d.npcId && n.role === 'merchant');
+  if ((d.role === 'merchant' || isMerchant) && d.npcId && !personal) {
     const choices = d.choices
       .filter((c) =>
         tradeTab === 'sell'
@@ -2839,11 +2845,36 @@ function workMenu() {
   const machines = game.productionStructures;
   openModal(
     'production',
-    `<div class="v-window-heading"><div><small>Gather · construct · supply · earn</small><h2>Make a working place</h2></div><button id="v-work-close" aria-label="Close work">×</button></div><p>Build on clear ground near your resources. Load real inputs, let the work run while you play, then collect the output at the platform. Merchants buy gathered materials and prepared goods.</p><div class="v-production-grid">${PRODUCTION_KINDS.map((k) => `<article><canvas data-production-preview="${k.id}" width="160" height="110" aria-label="${esc(k.name)} structure"></canvas><h3>${esc(k.name)}</h3><p>${k.coins} coins · ${amounts(k.items)}</p><p>${esc(k.description)}</p><button data-build-kind="${k.id}">Place in world</button></article>`).join('')}</div><div class="v-production-list">${
+    `<div class="v-window-heading"><div><small>Gather · construct · supply · earn</small><h2>Make a working place</h2></div><button id="v-work-close" aria-label="Close work">×</button></div><p>Start with propagation beds; prepare recipes to reach crafting level 2 and unlock powered machines. Build on clear ground near resources, load inputs, then collect output at the platform. Work continues while you explore; this menu pauses solo time. Merchants buy gathered materials and prepared goods.</p><div class="v-production-grid">${PRODUCTION_KINDS.map(
+      (k) => {
+        const missing = Object.entries(k.items)
+          .filter(([id, count]) => (game.inventory[id as ItemId] ?? 0) < count!)
+          .map(
+            ([id, count]) =>
+              `${count! - (game.inventory[id as ItemId] ?? 0)} ${game.itemName(id as ItemId)}`,
+          );
+        if (game.player.coins < k.coins) missing.unshift(`${k.coins - game.player.coins} coins`);
+        const locked =
+          k.id !== 'garden' && professionProfile(game.progression, 'crafting').level < 2;
+        const reason =
+          game.spaceId !== 'surface'
+            ? 'Return to the surface'
+            : machines.length >= 8
+              ? 'Dismantle a platform to free a slot'
+              : locked
+                ? 'Requires crafting level 2'
+                : missing.length
+                  ? `Need ${missing.join(', ')}`
+                  : '';
+        return `<article><canvas data-production-preview="${k.id}" width="160" height="110" aria-label="${esc(k.name)} structure"></canvas><h3>${esc(k.name)}</h3><p>${k.coins} coins · ${amounts(k.items)}</p><p>${esc(k.description)}</p><button data-build-kind="${k.id}" ${reason ? 'disabled' : ''}>Place in world</button>${reason ? `<small class="v-work-budget">${esc(reason)}</small>` : ''}</article>`;
+      },
+    ).join('')}</div><div class="v-production-list">${
       machines
         .map((m) => {
-          const near = Math.hypot(m.x - game.player.x, m.y - game.player.y) < 3;
-          return `<article><canvas data-production-preview="${m.kind}" data-production-progress="${m.progress}" width="160" height="110" aria-label="${esc(m.kind)} work platform"></canvas><header><b>${esc(PRODUCTION_KINDS.find((k) => k.id === m.kind)!.name)}</b><span>${esc({ idle: 'Ready for inputs', working: 'Making the next batch', ready: 'Output ready', blocked: 'Work interrupted' }[m.phase] ?? m.phase)} · ${Math.round(Math.hypot(m.x - game.player.x, m.y - game.player.y))} paces away</span></header>${m.job ? `<progress value="${m.progress}" max="1"></progress><p>${esc(m.job.blocked || `${m.job.completed}/${m.job.batches} batches completed`)} · ${Math.floor(m.progress * 100)}%</p>` : ''}<p>Stored: ${amounts(m.output)} ${!near ? '· Approach to supply or collect' : ''}</p>${
+          const near =
+            game.spaceId === 'surface' && Math.hypot(m.x - game.player.x, m.y - game.player.y) < 3;
+          const dismantle = game.dismantleProductionPreview(m.id);
+          return `<article><canvas data-production-preview="${m.kind}" data-production-progress="${m.progress}" width="160" height="110" aria-label="${esc(m.kind)} work platform"></canvas><header><b>${esc(PRODUCTION_KINDS.find((k) => k.id === m.kind)!.name)}</b><span>${esc({ idle: 'Ready for inputs', working: 'Making the next batch', ready: 'Output ready', blocked: 'Work interrupted', 'awaiting-claim': 'Waiting for room confirmation' }[m.phase] ?? m.phase)} · ${Math.round(Math.hypot(m.x - game.player.x, m.y - game.player.y))} paces away</span></header>${m.job ? `<progress value="${m.totalProgress}" max="1" aria-label="Whole job progress"></progress><p>${esc(m.job.blocked || `${m.job.completed}/${m.job.batches} batches completed`)} · ${Math.floor(m.totalProgress * 100)}% total · ${Math.ceil(m.remainingSeconds)}s of work left</p>` : ''}<p>Stored: ${amounts(m.output)} ${!near ? '· Approach to supply or collect' : ''}</p>${
             !m.job
               ? `<select aria-label="Production recipe" data-machine-recipe="${m.id}">${game.productionRecipes
                   .filter((r) => r.kind === m.kind)
@@ -2855,7 +2886,7 @@ function workMenu() {
                     '',
                   )}</select><select aria-label="Batch count" data-machine-batches="${m.id}">${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n} batch${n > 1 ? 'es' : ''}</option>`).join('')}</select><button data-machine-start="${m.id}" ${near ? '' : 'disabled'}>Load inputs</button>`
               : `<button data-machine-cancel="${m.id}" ${near ? '' : 'disabled'}>Cancel & retrieve inputs</button>${m.phase === 'blocked' ? `<button data-machine-retry="${m.id}" ${near ? '' : 'disabled'}>Retry</button>` : ''}`
-          }<button data-machine-collect="${m.id}" ${near && Object.values(m.output).some((n) => n) ? '' : 'disabled'}>Collect output</button><button data-machine-track="${m.id}">Track</button></article>`;
+          }<button data-machine-collect="${m.id}" ${near && Object.values(m.output).some((n) => n) ? '' : 'disabled'}>Collect output</button><button data-machine-track="${m.id}">Track</button><details><summary>Move this work elsewhere</summary><p>${esc(dismantle.message)}</p><button data-machine-dismantle="${m.id}" ${dismantle.ok ? '' : 'disabled'}>Dismantle & salvage</button></details></article>`;
         })
         .join('') ||
       '<p>No production platforms yet. Gather timber and ore with your tools, then choose a clear work site.</p>'
@@ -2930,6 +2961,11 @@ function workMenu() {
   document
     .querySelectorAll<HTMLElement>('[data-machine-collect]')
     .forEach((n) => (n.onclick = () => finish(game.collectProduction(n.dataset.machineCollect!))));
+  document
+    .querySelectorAll<HTMLElement>('[data-machine-dismantle]')
+    .forEach(
+      (n) => (n.onclick = () => finish(game.dismantleProduction(n.dataset.machineDismantle!))),
+    );
   document.querySelectorAll<HTMLElement>('[data-machine-track]').forEach(
     (n) =>
       (n.onclick = () => {
