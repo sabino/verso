@@ -15,7 +15,9 @@ if (
 )
   throw Error('Use the verified workspace endpoint and the local or published Verso frontend.');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const out = path.join(root, '.dream-loop/stichos-production');
+const out = process.env.VERSO_PRODUCTION_EVIDENCE
+  ? path.resolve(process.env.VERSO_PRODUCTION_EVIDENCE)
+  : path.join(root, '.dream-loop/stichos-production');
 fs.mkdirSync(out, { recursive: true });
 const started = new Date(),
   results = [],
@@ -165,6 +167,17 @@ async function traveler(name, seed = '3886') {
     await key('a', 'KeyA', 65, 0, 2);
     await page.send('Input.insertText', { text });
   };
+  const selectIndex = async (selector, index) => {
+    await click(selector);
+    await key('Home', 'Home', 36);
+    for (let i = 0; i < index; i++) await key('ArrowDown', 'ArrowDown', 40);
+    await key('Enter', 'Enter', 13);
+    assert.equal(
+      await read(`document.querySelector(${JSON.stringify(selector)}).selectedIndex`),
+      index,
+      'The native select accepted the requested option',
+    );
+  };
   const state = () => read('window.stichos.state');
   const shot = async (label) => {
     await focus();
@@ -202,6 +215,7 @@ async function traveler(name, seed = '3886') {
     point,
     click,
     fill,
+    selectIndex,
     state,
     shot,
     worldClick,
@@ -327,6 +341,62 @@ try {
     JSON.stringify(site),
   );
   await c.shot('02-garden-constructed');
+  await c.click('#v-work');
+  assert.match(
+    await c.read("document.querySelector('.v-work-clock').textContent"),
+    /paused.*Return to the world/i,
+    'Solo production explains why waiting in its menu cannot finish a job',
+  );
+  const preview = () =>
+    c.read(
+      `(()=>{const p=document.querySelector('[data-machine-preview="${id}"]');return {inputs:p.querySelector('[data-job-inputs]').textContent,output:p.querySelector('[data-job-output]').textContent,seconds:p.querySelector('[data-job-seconds]').textContent,readiness:p.querySelector('[data-job-readiness]').textContent,disabled:document.querySelector('[data-machine-start="${id}"]').disabled};})()`,
+    );
+  const one = await preview();
+  assert.match(one.inputs, /1 cequin.*1 timber/i);
+  assert.match(one.output, /3 cequin/i);
+  assert.equal(one.seconds, '80s');
+  assert.equal(one.disabled, false);
+  await c.selectIndex(`[data-machine-batches="${id}"]`, 4);
+  const five = await preview();
+  assert.match(five.inputs, /5 cequin.*5 timber/i);
+  assert.match(five.output, /15 cequin/i);
+  assert.equal(five.seconds, '400s');
+  assert.equal(five.disabled, true, 'An unaffordable batch count cannot load inputs');
+  assert.ok(five.readiness.length > 10, 'The disabled action explains the missing requirement');
+  await c.selectIndex(`[data-machine-recipe="${id}"]`, 1);
+  const alternate = await preview();
+  assert.match(alternate.inputs, /5 heartleaf.*5 timber/i);
+  assert.match(alternate.output, /15 heartleaf/i);
+  assert.equal(alternate.disabled, true);
+  assert.deepEqual((await c.state()).inventory, built.inventory, 'Previewing cannot spend inputs');
+  pass('Recipe and batch selectors show exact total inputs, output, time, and unavailable reason');
+  await c.shot('02b-five-batch-preview');
+  await c.selectIndex(`[data-machine-recipe="${id}"]`, 0);
+  await c.selectIndex(`[data-machine-batches="${id}"]`, 0);
+  await c.page.send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await c.wait('innerWidth===390', 'phone viewport');
+  assert.equal(
+    await c.read(
+      "(()=>{const p=document.querySelector('[data-screen=production]');return p.scrollWidth<=p.clientWidth+1 && document.documentElement.scrollWidth<=innerWidth;})()",
+    ),
+    true,
+    'The production preview fits a 390px phone without horizontal overflow',
+  );
+  await c.shot('02c-phone-production-preview');
+  await c.click('#v-work-return');
+  await c.wait("window.stichos.state.modal===''", 'phone Return to the world resumes play');
+  pass('The phone production menu keeps its batch preview and return action usable');
+  await c.page.send('Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 960,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
   await c.click('#v-work');
   await c.click(`[data-machine-start="${id}"]`);
   const loaded = await c.state();

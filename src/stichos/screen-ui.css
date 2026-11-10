@@ -333,7 +333,7 @@ button[aria-selected='true'] {
 .v-production-grid canvas,
 .v-production-list canvas {
   width: 120px;
-  height: 90px;
+  height: 105px;
   image-rendering: pixelated;
 }
 .v-production-list > article {
@@ -343,6 +343,58 @@ button[aria-selected='true'] {
 }
 .v-production-list select {
   max-width: 100%;
+}
+.v-job-controls {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(90px, 0.35fr);
+  gap: 10px;
+  margin: 12px 0;
+}
+.v-job-controls label {
+  display: grid;
+  min-width: 0;
+  gap: 6px;
+  font-size: 12px;
+}
+.v-job-controls select {
+  width: 100%;
+  min-width: 0;
+  min-height: var(--v-touch);
+}
+.v-job-preview {
+  padding: 10px 12px;
+  margin-bottom: 12px;
+  background: #0e2029;
+  border-left: 2px solid var(--v-bronze);
+}
+.v-job-preview dl {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+  font-size: 12px;
+}
+.v-job-preview dl > div {
+  display: grid;
+  grid-template-columns: 90px minmax(0, 1fr);
+  gap: 8px;
+}
+.v-job-preview dt {
+  color: #9fb6b8;
+}
+.v-job-preview dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.v-job-preview p {
+  margin: 10px 0 0;
+  font-size: 12px;
+}
+.s-window .v-work-clock {
+  flex: none;
+  margin: 8px 12px;
+  font-size: 12px;
+  line-height: 1.4;
+  color: #e1c697;
 }
 .s-dialogue {
   max-height: calc(100dvh - 115px);

@@ -182,6 +182,17 @@ for (const kind of ['garden', 'sawmill', 'ore-sorter'])
     drawProduction(c.getContext('2d'), kind, 50, 75, 1, progress, true, 3);
     record('production', kind + '/' + progress, { image: c, x: 50, y: 75 }, {});
   }
+for (const kind of ['garden', 'sawmill', 'ore-sorter'])
+  for (const phase of ['idle', 'working', 'ready', 'blocked', 'awaiting-claim']) {
+    const c = createCanvas(100, 100);
+    drawProduction(c.getContext('2d'), kind, 50, 75, 1, 0.5, phase === 'working', 3, {
+      phase,
+      stored: phase === 'idle' ? 0 : 8,
+      totalProgress: 0.7,
+      reducedMotion: true,
+    });
+    record('production', kind + '/' + phase, { image: c, x: 50, y: 75 }, {});
+  }
 for (const kind of Object.keys(ESTATE_STATIONS))
   for (const working of [false, true]) {
     const c = createCanvas(100, 100);

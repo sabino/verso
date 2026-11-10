@@ -214,6 +214,26 @@ async function main() {
         url: `http://localhost:${baselineServer.address().port}/`,
         out,
       });
+    // A complete ordinary-input production loop: gather, build, preview, load,
+    // spend real active time, collect once, and continue the saved life.
+    await new Promise((resolve, reject) => {
+      const production = spawn(
+        process.execPath,
+        ['scripts/browser-production.mjs', endpoint, `http://localhost:${server.address().port}/`],
+        {
+          stdio: 'inherit',
+          env: { ...process.env, VERSO_PRODUCTION_EVIDENCE: path.join(out, 'production') },
+          timeout: 300_000,
+          killSignal: 'SIGTERM',
+        },
+      );
+      production.once('error', reject);
+      production.once('exit', (code, signal) =>
+        code === 0
+          ? resolve()
+          : reject(Error(`Production browser route failed (code ${code}, signal ${signal})`)),
+      );
+    });
   } finally {
     browser?.kill('SIGTERM');
     if (log !== undefined) fs.closeSync(log);

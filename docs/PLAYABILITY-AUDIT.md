@@ -33,7 +33,18 @@ The first-life browser proof additionally checks actual conversation/trust actio
 
 ## Remaining design work
 
-This is a completed correctness and presentation pass, not a claim that every possible generated life has been played. Further work should reconcile personal and field/estate inventories, introduce bounded obstacle navigation for enemies before raising difficulty, and measure a long human session on actual phones. Shared-platform dismantling needs a server-authorized unregister protocol. Factory logistics networks, controllable squads, and StarCraft-scale warfare are not implemented by this pass.
+This is a completed correctness and presentation pass, not a claim that every possible generated life has been played. Further work should reconcile personal and field/estate inventories and measure a long human session on actual phones. Enemy navigation now handles local cover; global routing and long-distance pursuit remain outside that bounded system. Shared-platform dismantling needs a server-authorized unregister protocol. Factory logistics networks, controllable squads, and StarCraft-scale warfare are not implemented by this pass.
+
+## Navigation and production follow-up — 10 November 2026
+
+- Solo and room-authoritative enemies route around nearby obstacles using the same deterministic steering helper. Planning is limited to four searches per tick, 192 visited cells per search, a ten-tile radius, and a 650 ms retry delay. Closed doors remain barriers; attack preparation and encounter retreat/hold rules remain intact. Routes are runtime caches, not saved state.
+- Work previews show the selected batch count's total inputs, output, active seconds, and available unreserved sources. Invalid jobs explain their requirement before loading. A persistent pause notice and visible return button make clear that waiting inside Work does not complete production.
+- Platforms permit capacity-limited collection trips while retaining every uncollected item. Practice is awarded when the store is emptied, so splitting pickup does not multiply rewards.
+- Dismantling the final platform retains its structure and job counters across saving and reloading. Changing to another life requires returning to the surface, preventing a surface resident from inheriting dungeon coordinates.
+- Platforms display distinct stationary state signs, stored crates, and whole-job progress. Reduced motion freezes saw blades and vibrating sieves. Preview canvases include the complete status sign and progress bar.
+- The browser production route is part of hosted CI: real gathering, construction, recipe and batch selection, a 390-pixel phone preview, active work, pause, collection, save and Continue. It uses ordinary inputs rather than injecting supplies or finished jobs.
+
+The expanded procedural-art sweep covers **1,350 samples**, including 24 production views, with zero raster-boundary flags. This remains sampled visual evidence; it is not a claim of exhaustive seed coverage or a long human session.
 
 ## Procedural artwork — 10 November 2026
 

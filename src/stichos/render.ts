@@ -523,6 +523,13 @@ export class StichosRenderer {
             'progress' in m ? m.progress : 0,
             'phase' in m && m.phase === 'working',
             game.time,
+            {
+              phase: 'phase' in m ? m.phase : undefined,
+              stored:
+                'output' in m ? Object.values(m.output).reduce((sum, n) => sum + (n ?? 0), 0) : 0,
+              totalProgress: 'totalProgress' in m ? m.totalProgress : undefined,
+              reducedMotion: this.reducedMotion,
+            },
           ),
       });
     }
