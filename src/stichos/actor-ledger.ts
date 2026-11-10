@@ -249,17 +249,24 @@ export class ActorLedger<T extends ActorBody> {
     this.index(record);
     return true;
   }
-  setDestination(id: string, destination?: ActorAddress): boolean {
+  setDestination(
+    id: string,
+    destination?: ActorAddress,
+    options: { retry?: boolean } = {},
+  ): boolean {
     const record = this.records.get(id);
     if (!record || record.state === 'dead' || (destination && !validAddress(destination)))
       return false;
+    // Routine intentions are synchronized every tick. Only an explicit retry
+    // restarts a failed journey; ongoing and completed journeys stay idempotent.
     if (
-      (!destination && !record.destination) ||
-      (destination &&
-        record.destination &&
-        destination.spaceId === record.destination.spaceId &&
-        destination.x === record.destination.x &&
-        destination.y === record.destination.y)
+      !(options.retry && record.state === 'unreachable') &&
+      ((!destination && !record.destination) ||
+        (destination &&
+          record.destination &&
+          destination.spaceId === record.destination.spaceId &&
+          destination.x === record.destination.x &&
+          destination.y === record.destination.y))
     )
       return true;
     record.destination = destination && copyAddress(destination);

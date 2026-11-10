@@ -111,6 +111,7 @@ export class MultiplayerConnection {
   lastError = '';
   private serial = 0;
   private epoch = 0;
+  private cancelConnect: (() => void) | null = null;
   private pending = new Map<
     string,
     {
@@ -221,30 +222,48 @@ export class MultiplayerConnection {
         ? undefined
         : (pinned?.authority ?? stored?.authority ?? (resume ? this.knownAuthority : undefined));
     const peerFactory = peerHosted ? (await import('./peer-transport')).createPeerTransport : null;
-    if (epoch !== this.epoch) return;
+    if (epoch !== this.epoch)
+      throw new DOMException('The connection attempt was cancelled.', 'AbortError');
     return new Promise((resolve, reject) => {
       const socket = peerFactory
         ? peerFactory(room, undefined, hostedRestore, forceHost)
         : new WebSocket(url);
       this.socket = socket;
       let welcomed = false;
+      let failed = false;
+      let closed = false;
+      let settled = false;
+      let timeout: ReturnType<typeof setTimeout>;
+      const settle = (error?: Error) => {
+        if (settled) return;
+        settled = true;
+        if (error) failed = true;
+        clearTimeout(timeout);
+        if (this.cancelConnect === cancel) this.cancelConnect = null;
+        if (error) reject(error);
+        else resolve();
+      };
+      const cancel = () =>
+        settle(new DOMException('The connection attempt was cancelled.', 'AbortError'));
+      this.cancelConnect = cancel;
       const diagnostic = () => (socket as RoomTransport).diagnostic;
       const failureReason = (fallback: string) => diagnostic()?.error?.reason ?? fallback;
       if (peerHosted)
         (socket as RoomTransport).onstatuschange = () => {
-          if (epoch !== this.epoch) return;
+          if (failed || closed || epoch !== this.epoch) return;
           this.networkDiagnostic = diagnostic() ?? null;
           if (this.networkDiagnostic?.error) this.lastError = this.networkDiagnostic.error.reason;
           this.onNetworkChange();
         };
-      const timeout = setTimeout(
+      timeout = setTimeout(
         () => {
+          if (epoch !== this.epoch) return cancel();
           this.lastError = failureReason(
             peerHosted && diagnostic()
               ? peerFailure('timeout', diagnostic()!).reason
               : 'The game server did not answer.',
           );
-          reject(Error(this.lastError));
+          settle(Error(this.lastError));
           socket.close();
         },
         peerHosted ? PEER_CONNECT_TIMEOUT + 5000 : 10000,
@@ -269,6 +288,7 @@ export class MultiplayerConnection {
         });
       };
       socket.onopen = () => {
+        if (failed || closed || epoch !== this.epoch) return;
         if (pinnedKey && room)
           this.send({ type: 'hello', room, protocol: MULTIPLAYER_PROTOCOL, challenge });
         else join();
@@ -292,7 +312,7 @@ export class MultiplayerConnection {
             message.generation !== identity.generation
           ) {
             clearTimeout(timeout);
-            reject(
+            settle(
               Error(
                 'This room belongs to a different world. Enter its seed and generation before joining.',
               ),
@@ -330,7 +350,7 @@ export class MultiplayerConnection {
           if (message.living) this.receiveLiving(message.living);
           if (message.systems) this.receiveSystems(message.systems);
           this.onVoiceSessionChange();
-          resolve();
+          settle();
         } else if (message.type === 'voice_ticket') {
           const pending = this.voiceRequests.get(message.requestId);
           if (
@@ -416,15 +436,14 @@ export class MultiplayerConnection {
           if (!welcomed) {
             clearTimeout(timeout);
             this.lastError = message.reason;
-            reject(Error(message.reason));
+            settle(Error(message.reason));
             socket.close();
           } else this.onMessage(message.reason);
         }
       };
       let checkpointVerified = !pinned,
         proofVerified = false,
-        verifying = false,
-        failed = false;
+        verifying = false;
       let liveAuthority: JsonWebKey | undefined;
       let waiting: Extract<ServerMessage, { type: 'welcome' }> | null = null;
       let queued: ServerMessage[] = [],
@@ -436,7 +455,7 @@ export class MultiplayerConnection {
         queued = [];
         waiting = null;
         if (welcomed) this.onMessage(reason);
-        reject(Error(reason));
+        settle(Error(reason));
         socket.close();
       };
       const finishWelcome = () => {
@@ -541,18 +560,22 @@ export class MultiplayerConnection {
         consume(message);
       };
       socket.onerror = () => {
+        if (failed || closed || epoch !== this.epoch) return;
+        failed = true;
         clearTimeout(timeout);
         this.lastError = failureReason(
           peerHosted
             ? 'Could not reach that browser room. Keep the host’s game open and retry.'
             : 'Cannot reach the game server.',
         );
-        if (!welcomed) reject(Error(this.lastError));
+        if (!welcomed) settle(Error(this.lastError));
         socket.close();
       };
       socket.onclose = () => {
         clearTimeout(timeout);
-        if (epoch !== this.epoch) return;
+        if (closed || epoch !== this.epoch) return;
+        closed = true;
+        failed = true;
         this.socket = null;
         this.status = welcomed ? 'disconnected' : 'offline';
         this.clearVoiceSession();
@@ -565,7 +588,7 @@ export class MultiplayerConnection {
           );
         else {
           this.lastError ||= failureReason('The connection closed before joining the room.');
-          reject(Error(this.lastError));
+          settle(Error(this.lastError));
         }
       };
     });
@@ -618,6 +641,8 @@ export class MultiplayerConnection {
   }
   disconnect(forget = true) {
     this.epoch++;
+    this.cancelConnect?.();
+    this.cancelConnect = null;
     this.socket?.close();
     this.socket = null;
     this.networkDiagnostic = null;

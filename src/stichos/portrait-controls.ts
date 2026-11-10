@@ -8,6 +8,11 @@ export type PortraitAction =
   | 'ward'
   | 'interact';
 export type PortraitActionPhase = 'press' | 'release' | 'cancel';
+export interface PortraitActionAvailability {
+  allowed: boolean;
+  reason: string | null;
+  message: string | null;
+}
 export interface PortraitPreferences {
   handedness: 'right' | 'left';
   movement: 'joystick' | 'buttons';
@@ -82,6 +87,7 @@ export function mountPortraitControls(
   root: HTMLElement,
   options: {
     canAct: () => boolean;
+    actionAvailability?: (action: PortraitAction) => PortraitActionAvailability;
     onAction: (action: PortraitAction, phase: PortraitActionPhase, heldMs: number) => void;
     onMoveStart: () => void;
     sequences?: InteractionSequences;
@@ -119,6 +125,58 @@ export function mountPortraitControls(
     !document.hidden &&
     !root.classList.contains('portrait-required') &&
     options.canAct();
+  const actionLabels = new Map(
+    [...actionButtons].map(([action, button]) => [
+      action,
+      {
+        label: button.getAttribute('aria-label') ?? '',
+        title: button.title,
+        locked: false,
+        cooldown: 0,
+      },
+    ]),
+  );
+  const actionAllowed = (action: PortraitAction, continuing = false) => {
+    const button = actionButtons.get(action)!;
+    const label = actionLabels.get(action)!;
+    const availability = options.actionAvailability?.(action);
+    const blocked = availability?.allowed === false;
+    // An existing repeated-strike hold survives its own server acknowledgement.
+    // Keep native focus/capture intact, while rejecting every new activation.
+    const awaitingHeldAttack =
+      action === 'attack' &&
+      activeActions.has(action) &&
+      availability?.reason === 'action-pending' &&
+      allowed();
+    button.disabled = label.locked || (blocked && !awaitingHeldAttack);
+    button.setAttribute('aria-disabled', String(label.locked || blocked));
+    button.dataset.blockedReason = blocked
+      ? (availability.reason ?? '')
+      : label.locked
+        ? 'locked'
+        : '';
+    button.title =
+      blocked && availability.message
+        ? availability.message
+        : label.locked
+          ? label.label
+          : label.title;
+    button.setAttribute(
+      'aria-label',
+      blocked && availability.message ? `${label.label}: ${availability.message}` : label.label,
+    );
+    button.setAttribute(
+      'aria-description',
+      blocked && availability.message
+        ? availability.message
+        : label.locked
+          ? label.label
+          : label.cooldown > 0
+            ? 'Recovering'
+            : 'Ready',
+    );
+    return allowed() && !label.locked && (!blocked || (continuing && awaitingHeldAttack));
+  };
   const blurText = () => {
     if (document.activeElement?.matches('input,textarea,[contenteditable="true"]'))
       (document.activeElement as HTMLElement).blur();
@@ -136,7 +194,11 @@ export function mountPortraitControls(
     if (!active) return;
     activeActions.delete(action);
     actionButtons.get(action)?.classList.remove('is-held');
-    options.onAction(action, phase, Math.min(20000, Math.max(0, performance.now() - active.start)));
+    options.onAction(
+      action,
+      phase === 'release' && !actionAllowed(action) ? 'cancel' : phase,
+      Math.min(20000, Math.max(0, performance.now() - active.start)),
+    );
   };
   const release = () => {
     resetStick();
@@ -265,7 +327,7 @@ export function mountPortraitControls(
   }
   for (const [action, button] of actionButtons) {
     button.onpointerdown = (event) => {
-      if (event.button !== 0 || activeActions.has(action) || !allowed() || button.disabled) return;
+      if (event.button !== 0 || activeActions.has(action) || !actionAllowed(action)) return;
       if (options.sequences && !options.sequences.claim(event, button)) return;
       event.preventDefault();
       event.stopPropagation();
@@ -294,7 +356,7 @@ export function mountPortraitControls(
       if (event.key !== 'Enter' && event.key !== ' ') return;
       event.preventDefault();
       event.stopPropagation();
-      if (event.repeat || activeActions.has(action) || !allowed() || button.disabled) return;
+      if (event.repeat || activeActions.has(action) || !actionAllowed(action)) return;
       activeActions.set(action, { pointer: -1, start: performance.now() });
       button.classList.add('is-held');
       options.onAction(action, 'press', 0);
@@ -313,9 +375,9 @@ export function mountPortraitControls(
     // Pointer activation already ran press/release; never attack twice for its click.
     button.onclick = (event) => {
       event.stopPropagation();
-      if (event.detail !== 0 || !allowed() || button.disabled) return;
+      if (event.detail !== 0 || !actionAllowed(action)) return;
       options.onAction(action, 'press', 0);
-      options.onAction(action, 'release', 0);
+      options.onAction(action, actionAllowed(action) ? 'release' : 'cancel', 0);
     };
   }
   pane.oncontextmenu = (event) => event.preventDefault();
@@ -346,22 +408,23 @@ export function mountPortraitControls(
         const button = actionButtons.get(action)!;
         const label = technique.shortLabel ?? technique.label;
         button.querySelector<HTMLElement>('.v-control-label')!.textContent = label;
-        button.setAttribute(
-          'aria-label',
-          technique.unlocked
-            ? technique.label
-            : `${technique.label}: ${technique.lockedReason || 'currently unavailable'}`,
-        );
-        button.disabled = !technique.unlocked;
+        const presentation = actionLabels.get(action)!;
+        presentation.label = technique.unlocked
+          ? technique.label
+          : `${technique.label}: ${technique.lockedReason || 'currently unavailable'}`;
+        presentation.locked = !technique.unlocked;
         button.classList.toggle('is-locked', !technique.unlocked);
         cooldowns[action] = technique.cooldown;
       }
     for (const [action, value] of Object.entries(cooldowns)) {
       if (value === undefined) continue;
       const button = actionButtons.get(action as PortraitAction)!;
+      actionLabels.get(action as PortraitAction)!.cooldown = fraction(value);
       button.style.setProperty('--v-cooldown', `${fraction(value) * 100}%`);
       button.classList.toggle('is-cooling', fraction(value) > 0);
-      button.setAttribute('aria-description', fraction(value) > 0 ? 'Recovering' : 'Ready');
+    }
+    for (const action of actionButtons.keys()) {
+      if (!actionAllowed(action, true)) finish(action, 'cancel');
     }
     if (state.attackLabel !== undefined)
       actionButtons.get('attack')!.querySelector<HTMLElement>('.v-control-label')!.textContent =

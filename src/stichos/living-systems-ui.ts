@@ -10,7 +10,7 @@ import {
   type StationKind,
 } from './property-world.ts';
 import { UNDERWORLD_RULES, type UnderworldFeature } from './underworld.ts';
-import type { Heraldry } from './civic-world.ts';
+import { guildMembershipActions, type Heraldry } from './civic-world.ts';
 
 export type LivingSystemsSection = 'field' | 'charters' | 'estates' | 'signs';
 export interface LivingSystemsUiState {
@@ -403,6 +403,7 @@ export function renderLivingSystemsPanel(
     const f = frame.factions.find((f) => f.id === state.detail);
     if (f) {
       const m = frame.memberships.find((m) => m.factionId === f.id),
+        membershipActions = guildMembershipActions(m),
         contacts = (frame as LivingSystemsFrame & FrameTargets).contacts ?? [],
         contact = contacts.find((c) => c.factionId === f.id),
         duty = frame.duties.find((d) => d.id.startsWith(`duty:${f.id}:`));
@@ -425,14 +426,15 @@ export function renderLivingSystemsPanel(
           !contact || !reachable,
         );
       body = `${back()}<div class="v-living-emblem-title">${livingHeraldry(f.heraldry)}${heading(f.name, f.principles)}</div>${notice(contact ? `${contact.name} · ${reachable ? 'within speaking distance' : Number.isFinite(range) && point ? `${Math.ceil(range)} paces ${headingTo(point.x - frame.location.x, point.y - frame.location.y)}` : 'current whereabouts unknown'}.` : 'No unoccupied guild contact is known here.')} ${point && !reachable ? button('Walk to contact', { kind: 'travel', address: point, label: contact!.name }) : ''}<dl class="v-living-facts"><dt>Standing</dt><dd>${esc(m?.status === 'member' ? (f.ranks[m.rank] ?? 'Member') : (m?.status ?? 'Undiscovered'))}</dd><dt>Entry</dt><dd>${esc(bundleText(f.entryCost))}</dd><dt>Dues</dt><dd>${f.dues} coins</dd></dl>`;
-      if (!m?.discovered) body += guild('Ask for the charter', 'discover');
-      else if (m.status === 'visitor')
-        body += `<div class="v-living-actions">${guild('Join this guild', 'join')}${nav('Not now')}</div>`;
-      else if (m.status === 'member') {
+      if (membershipActions.includes('discover')) body += guild('Ask for the charter', 'discover');
+      else if (membershipActions.includes('join'))
+        body += `<div class="v-living-actions">${guild(m?.status === 'left' ? 'Rejoin this guild' : 'Join this guild', 'join')}${nav('Not now')}</div>`;
+      else if (m && membershipActions.includes('duty')) {
         body += `<details class="v-living-disclosure"><summary>Your oath and standing</summary><ul><li>Your named charter membership and current rank are remembered.</li><li>${esc(f.benefits[m.rank] ?? 'Charter standing recorded')}</li><li>Complete the active duty with your local contact to earn standing.</li><li>Keep dues current; rivals and witnesses can affect trust.</li></ul>${notice(f.rivalId ? `Rival charter: ${frame.factions.find((other) => other.id === f.rivalId)?.name ?? 'Ask your contact about their rivals.'}` : 'No rival charter is known here.')}<div class="v-living-actions">${guild('Pay dues', 'dues')}${button('Leave guild', { kind: 'confirm', label: `Surrender your badge and membership in ${f.name}? The guild will remember your departure.`, command: { kind: 'guild', action: 'leave', factionId: f.id, npcId: contact?.npcId ?? '' } }, !contact || !reachable)}</div></details>`;
         if (duty)
           body += `<section class="v-living-task">${heading(duty.title, duty.description)}${notice(bundleText(duty.cost))}${notice(`Standing earned: ${duty.standing}. ${duty.action ? 'A qualifying witnessed action is required.' : 'Listed supplies are consumed on acceptance.'}`)}${guild('Fulfil today’s duty', 'duty')}</section>`;
-      } else body += guild('Seek reconciliation', 'reconcile');
+      } else if (membershipActions.includes('reconcile'))
+        body += guild('Seek reconciliation', 'reconcile');
     } else
       body = `${frame.town ? heading(frame.town.name, frame.reputation?.summary) : heading('Local charters')}${frame.laws ? notice(frame.laws.description) : ''}${
         frame.factions.length

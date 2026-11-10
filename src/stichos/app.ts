@@ -22,6 +22,7 @@ import { mountMobileViewport, isTextEntry } from './mobile-viewport.ts';
 import { createWorldExperience } from './experience.ts';
 import { mountVoiceUi } from './voice-ui.ts';
 import { mountInteractionSequences } from './interaction-sequence.ts';
+import { interactionState, strikeDestination } from './interaction-state.ts';
 import { FrameProfiler } from './frame-profiler.ts';
 import aiCompanionGuide from '../../docs/stichos/AI-COMPANION.md?url';
 import { drawProduction } from './production-art';
@@ -305,26 +306,27 @@ const travel = new TravelController({
 let travelTarget: string | undefined;
 let travelObstructed = false;
 const releaseDirectionPointers = new Set<() => void>();
+function releaseWorldInput(reason: 'dialogue' | 'menu' | 'interaction') {
+  travel.cancel(reason);
+  travelTarget = undefined;
+  heldAttack = false;
+  heldTechnique = null;
+  keys.clear();
+  walk = [];
+  walkTarget = undefined;
+  for (const release of releaseDirectionPointers) release();
+  portraitControls.release();
+  voiceUi.release();
+}
 const inputSequences = mountInteractionSequences(root, {
-  onTransition: () => {
-    travel.cancel(game.dialogue ? 'dialogue' : 'menu');
-    travelTarget = undefined;
-    heldAttack = false;
-    heldTechnique = null;
-    keys.clear();
-    walk = [];
-    walkTarget = undefined;
-    for (const release of releaseDirectionPointers) release();
-    portraitControls.release();
-    voiceUi.release();
-  },
+  onTransition: () => releaseWorldInput(game.dialogue ? 'dialogue' : 'menu'),
 });
 const voiceUi = mountVoiceUi({
   sequences: inputSequences,
   voice: experience.voice,
   container: el('v-voice-mount'),
   peers: () => multiplayer.peers,
-  canTalk: () => started && !paused && !modal && !game.dialogue && !transferStarted,
+  canTalk: () => currentInteraction().capabilities.voice.allowed,
   openRoomSetup: () => togetherMenu(),
   closeSettings: () => closeModal(),
   openSettings: (html, mount) => {
@@ -343,15 +345,9 @@ addEventListener('verso-app-mode-change', applyAppMode);
 applyAppMode();
 const portraitControls = mountPortraitControls(root, {
   sequences: inputSequences,
-  canAct: () =>
-    started &&
-    !paused &&
-    !modal &&
-    (!sharedActionPending || combatPending) &&
-    !game.dialogue &&
-    !transferStarted &&
-    !root.classList.contains('satchel-open') &&
-    game.phase === 'playing',
+  canAct: () => currentInteraction().capabilities.move.allowed,
+  actionAvailability: (action) =>
+    currentInteraction().capabilities[action === 'interact' ? 'interact' : 'combat'],
   onMoveStart: () => {
     travel.cancel('manual');
     travelTarget = undefined;
@@ -390,6 +386,7 @@ const portraitControls = mountPortraitControls(root, {
   },
 });
 let placingEstate: { propertyId: string; station: StationKind; point?: Point } | null = null;
+let placingProduction: ProductionKind | null = null;
 const estatePlacementControls = document.createElement('section');
 estatePlacementControls.className = 'v-estate-placement';
 estatePlacementControls.hidden = true;
@@ -400,6 +397,10 @@ estatePlacementControls.innerHTML =
 function cancelBlueprint() {
   placingEstate = null;
   estatePlacementControls.hidden = true;
+}
+function cancelPlacement() {
+  cancelBlueprint();
+  placingProduction = null;
 }
 function showBlueprint() {
   estatePlacementControls.hidden = !placingEstate;
@@ -511,23 +512,28 @@ const livingUi = createLivingSystemsUi({
     showBlueprint();
   },
 });
+function currentInteraction() {
+  return interactionState({
+    started,
+    phase: game.phase,
+    paused,
+    modal,
+    transfer: !!transferStarted,
+    dialogue: !!game.dialogue,
+    satchel: root.classList.contains('satchel-open'),
+    hidden: document.hidden,
+    portraitRequired: mobileViewport.diagnostics.portraitRequired,
+    focus: isTextEntry(document.activeElement)
+      ? 'text'
+      : document.activeElement?.closest('select')
+        ? 'select'
+        : 'world',
+    pending: sharedActionPending ? (combatPending ? 'combat' : 'world') : 'idle',
+    placement: placingEstate ? 'estate' : placingProduction ? 'production' : 'none',
+  });
+}
 function canUseMovementControls() {
-  return (
-    started &&
-    !paused &&
-    !modal &&
-    !game.dialogue &&
-    !transferStarted &&
-    (!sharedActionPending || combatPending) &&
-    game.phase === 'playing' &&
-    !document.hidden &&
-    !root.classList.contains('satchel-open') &&
-    !root.classList.contains('portrait-required') &&
-    !placingEstate &&
-    !placingProduction &&
-    !isTextEntry(document.activeElement) &&
-    !document.activeElement?.closest('select')
-  );
+  return currentInteraction().capabilities.travel.allowed;
 }
 const travelUi = mountTravelUi(root, {
   canAct: canUseMovementControls,
@@ -646,6 +652,8 @@ function save() {
   }
 }
 function activate(next: Stichos) {
+  inputSequences.transition();
+  cancelPlacement();
   voiceUi.release();
   game.clearLivingWorldAuthority();
   multiplayer.disconnect();
@@ -671,6 +679,7 @@ function activate(next: Stichos) {
   keys.clear();
   packSignature = '';
   trackedQuestId = null;
+  trackedExpedition = null;
   notebookView.open = false;
   chartView = null;
   mapWaypoint = null;
@@ -688,7 +697,7 @@ function setInert(value: boolean) {
 }
 let modalInvoker: HTMLElement | null = null;
 function openModal(kind: string, html: string, completeWindow = false) {
-  cancelBlueprint();
+  cancelPlacement();
   inputSequences.transition();
   heldAttack = false;
   heldTechnique = null;
@@ -1125,6 +1134,7 @@ const recovering = [
   ],
 ];
 function transfer(kind: 'opening' | 'arrival' | 'return' | 'clinic', after?: () => void) {
+  cancelPlacement();
   inputSequences.transition();
   voiceUi.release();
   closeModal();
@@ -1844,6 +1854,7 @@ function lost() {
 }
 el('v-pack-close').onclick = () => setSatchel(false);
 function setSatchel(open: boolean) {
+  if (open) cancelPlacement();
   if (root.classList.contains('satchel-open') !== open) inputSequences.transition();
   keys.clear();
   walk = [];
@@ -2033,6 +2044,7 @@ function updateDialogue() {
 }
 function updateUI() {
   if (modal === 'living-systems') livingUi.update();
+  const interaction = currentInteraction();
   const techniquePair = game.techniques;
   const cooldownProfile =
     game.activeArtifact?.properties ??
@@ -2041,16 +2053,7 @@ function updateUI() {
     );
   portraitControls.update({
     runPace: travelUi.pace === 'run',
-    enabled:
-      started &&
-      !paused &&
-      !modal &&
-      (!sharedActionPending || combatPending) &&
-      !game.dialogue &&
-      !transferStarted &&
-      !root.classList.contains('satchel-open') &&
-      !mobileViewport.diagnostics.portraitRequired &&
-      game.phase === 'playing',
+    enabled: interaction.capabilities.move.allowed,
     attackCooldown: game.player.attackCooldown / cooldownProfile.cooldown,
     wardCooldown: game.player.wardCooldown / 8,
     dodgeCooldown: game.dodgeCooldown / STEP_RULES.cooldown,
@@ -2211,12 +2214,13 @@ function updateUI() {
   document
     .querySelectorAll<HTMLElement>('[data-count]')
     .forEach((n) => (n.textContent = String(game.inventory[n.dataset.count as ItemId] ?? 0)));
-  const equipmentKey = `${p.appearance.seed}:${p.appearance.weapon}:${(['staff', 'sword', 'bow'] as const).map((kind) => game.weaponSeed(kind)).join(':')}:${game.activeArtifact?.design ?? ''}`;
+  const undergroundKit = game.underworldFrame ? game.livingSystemsFrame?.equipment : null;
+  const equipmentKey = `${p.appearance.seed}:${p.appearance.weapon}:${(['staff', 'sword', 'bow'] as const).map((kind) => game.weaponSeed(kind)).join(':')}:${game.activeArtifact?.design ?? ''}:${undergroundKit?.kind ?? ''}:${undergroundKit?.seed ?? ''}`;
   const equipmentChanged = equipmentSignature !== equipmentKey;
   equipmentSignature = equipmentKey;
   if (equipmentChanged) {
-    const kind = p.appearance.weapon;
-    const artifact = game.activeArtifact;
+    const kind = undergroundKit?.kind ?? p.appearance.weapon;
+    const artifact = undergroundKit ? null : game.activeArtifact;
     const attackButton = document.querySelector<HTMLButtonElement>('[data-action="attack"]');
     attackButton
       ?.querySelector('svg, img')
@@ -2228,22 +2232,35 @@ function updateUI() {
               ? `<img src="${artifactIcon(artifact.design, 30)}" width="30" height="30" alt="">`
               : kind === 'none'
                 ? itemIcon('hand')
-                : weaponIcon(game.weaponSeed(kind), kind, 30),
+                : weaponIcon(undergroundKit?.seed ?? game.weaponSeed(kind), kind, 30),
           ),
       );
     if (attackButton)
-      attackButton.title = artifact
-        ? `${artifact.name} · ${artifact.properties.damage} strength · ${artifact.delivery}`
-        : kind === 'none'
-          ? 'Empty hands · equip a weapon to attack'
-          : game.weaponProfile(kind).name;
+      attackButton.title = undergroundKit
+        ? `${undergroundKit.kind} · underground equipment`
+        : artifact
+          ? `${artifact.name} · ${artifact.properties.damage} strength · ${artifact.delivery}`
+          : kind === 'none'
+            ? 'Empty hands · equip a weapon to attack'
+            : game.weaponProfile(kind).name;
     if (attackButton) {
-      attackButton.disabled = false;
+      attackButton.dataset.actionTitle = attackButton.title;
       const label = attackButton.querySelector('span');
       if (label) label.textContent = !artifact && kind === 'none' ? 'Equip' : 'Strike';
       attackButton.setAttribute('aria-label', attackButton.title);
     }
   }
+  document.querySelectorAll<HTMLButtonElement>('[data-action]').forEach((button) => {
+    const allowed =
+      interaction.capabilities[button.dataset.action === 'interact' ? 'interact' : 'combat'];
+    button.dataset.actionTitle ??= button.title;
+    button.disabled = !allowed.allowed;
+    button.dataset.blockedReason = allowed.reason ?? '';
+    button.title = allowed.message
+      ? `${button.dataset.actionTitle} · ${allowed.message}`
+      : button.dataset.actionTitle;
+    button.setAttribute('aria-label', button.title);
+  });
   document.querySelectorAll<HTMLButtonElement>('[data-equip]').forEach((n) => {
     if (equipmentChanged)
       n.innerHTML = weaponIcon(
@@ -2690,11 +2707,12 @@ el<HTMLFormElement>('v-chat-form').onsubmit = (e) => {
   canvas.focus({ preventScroll: true });
   void say(text);
 };
-el('v-chat-input').onfocus = () => {
-  voiceUi.release();
-  keys.clear();
-  walk = [];
-};
+// Focus owns input immediately; held gestures and routes cannot continue behind typing.
+root.addEventListener('focusin', (event) => {
+  if (!isTextEntry(event.target) && !(event.target as HTMLElement).closest('select')) return;
+  // Focus does not replace the surface: preserve the click that focuses a native input/select.
+  releaseWorldInput('interaction');
+});
 el('v-chat-input').onkeydown = (e) => {
   if (e.isComposing) {
     e.stopPropagation();
@@ -2740,7 +2758,6 @@ document.querySelectorAll<HTMLElement>('[data-chat-channel]').forEach(
       setChatChannel(n.dataset.chatChannel as 'say' | 'world');
     }),
 );
-let placingProduction: ProductionKind | null = null;
 let productionSyncAt = 0,
   productionSyncBusy = false;
 const registeredProduction = new Set<string>();
@@ -3412,7 +3429,7 @@ async function combatShared(kind: 'attack' | 'ward') {
   }
 }
 async function dungeonAttack(attack: 'melee' | 'ranged' | 'spell' | 'guard') {
-  if (sharedActionPending || game.player.attackCooldown > 0) return;
+  if (!currentInteraction().capabilities.combat.allowed || game.player.attackCooldown > 0) return;
   const enemy = game.underworldFrame?.state.enemies
     .filter((e) => e.hp > 0)
     .sort(
@@ -3429,6 +3446,7 @@ async function dungeonAttack(attack: 'melee' | 'ranged' | 'spell' | 'guard') {
   else game.player.attackCooldown = 0.15;
 }
 async function stepPlayer(heading = game.player.heading) {
+  if (!currentInteraction().capabilities.combat.allowed) return;
   if (game.spaceId !== 'surface') {
     if (sharedActionPending || game.dodgeCooldown > 0) return;
     const result = await fieldAction({ kind: 'underworld-attack', attack: 'dodge', heading });
@@ -3437,8 +3455,7 @@ async function stepPlayer(heading = game.player.heading) {
   game.dodge(heading);
 }
 async function useTechnique(id: TechniqueId) {
-  if (!started || paused || modal || sharedActionPending || transferStarted || game.dialogue)
-    return;
+  if (!currentInteraction().capabilities.combat.allowed) return;
   if (game.underworldFrame) {
     await dungeonAttack(id === game.techniques[0]?.id ? 'guard' : 'melee');
     return;
@@ -3506,20 +3523,20 @@ async function parleyShared() {
   }
 }
 function act(command: string) {
+  const capability =
+    currentInteraction().capabilities[command === 'interact' ? 'interact' : 'combat'];
+  if (!capability.allowed) return;
   if (travel.active) {
     travel.cancel(command === 'interact' ? 'interaction' : 'danger');
     travelTarget = undefined;
   }
   if (
-    !started ||
-    paused ||
-    sharedActionPending ||
-    transferStarted ||
-    game.dialogue ||
-    game.phase !== 'playing'
-  )
-    return;
-  if (command === 'attack' && !game.activeArtifact && game.player.appearance.weapon === 'none') {
+    command === 'attack' &&
+    strikeDestination(
+      !!game.underworldFrame,
+      !!game.activeArtifact || game.player.appearance.weapon !== 'none',
+    ) === 'equipment'
+  ) {
     equipmentMenu();
     return;
   }
@@ -3597,14 +3614,7 @@ canvas.addEventListener('pointerleave', () => {
 });
 canvas.addEventListener('pointerdown', (event) => {
   touchAiming = event.pointerType === 'touch';
-  if (
-    paused ||
-    sharedActionPending ||
-    game.dialogue ||
-    !started ||
-    root.classList.contains('satchel-open')
-  )
-    return;
+  if (!currentInteraction().capabilities.worldPointer.allowed) return;
   if (event.button !== 0 && event.button !== 2) return;
   if (!inputSequences.claim(event, canvas)) return;
   event.preventDefault();
@@ -3626,6 +3636,20 @@ canvas.addEventListener('pointerdown', (event) => {
   if (placingEstate) {
     placingEstate.point = { x: Math.round(ground.x), y: Math.round(ground.y) };
     showBlueprint();
+    return;
+  }
+  if (placingProduction) {
+    const preview = game.productionPreview(placingProduction, ground);
+    if (!preview.ok) {
+      toast(preview.message);
+      if (Math.hypot(ground.x - game.player.x, ground.y - game.player.y) > 2) {
+        walk = pathTo(ground);
+        walkTarget = undefined;
+        walkStuck = 0;
+      }
+      return;
+    }
+    void placeProduction(placingProduction, ground);
     return;
   }
   const drop = game.livingSystemsFrame?.economy.drops.find(
@@ -3696,20 +3720,6 @@ canvas.addEventListener('pointerdown', (event) => {
       travelTarget = `entrance:${entrance.settlementId}`;
       travel.travel(game.player, entrance, { label: entrance.name });
     }
-    return;
-  }
-  if (placingProduction) {
-    const preview = game.productionPreview(placingProduction, ground);
-    if (!preview.ok) {
-      toast(preview.message);
-      if (Math.hypot(ground.x - game.player.x, ground.y - game.player.y) > 2) {
-        walk = pathTo(ground);
-        walkTarget = undefined;
-        walkStuck = 0;
-      }
-      return;
-    }
-    void placeProduction(placingProduction, ground);
     return;
   }
   const machine = game.productionStructures.find(
@@ -3827,14 +3837,7 @@ document.querySelectorAll<HTMLButtonElement>('[data-move]').forEach((button) => 
   button.onpointerdown = (e) => {
     e.preventDefault();
     e.stopPropagation();
-    if (
-      owner !== null ||
-      paused ||
-      game.dialogue ||
-      transferStarted ||
-      root.classList.contains('satchel-open')
-    )
-      return;
+    if (owner !== null || !currentInteraction().capabilities.move.allowed) return;
     if (!inputSequences.claim(e, button)) return;
     owner = e.pointerId;
     if (isTextEntry(document.activeElement)) (document.activeElement as HTMLElement).blur();
@@ -3853,10 +3856,6 @@ document.querySelectorAll<HTMLButtonElement>('[data-move]').forEach((button) => 
 });
 addEventListener('keydown', (e) => {
   if (e.defaultPrevented) return;
-  if (sharedActionPending && !combatPending) {
-    e.preventDefault();
-    return;
-  }
   if (
     e.key === 'Tab' &&
     (modal || transferStarted || game.dialogue || root.classList.contains('satchel-open'))
@@ -3997,6 +3996,7 @@ addEventListener('keydown', (e) => {
     ['w', 'a', 's', 'd', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright', 'shift'].includes(k)
   ) {
     e.preventDefault();
+    if (!currentInteraction().capabilities.move.allowed) return;
     keys.add(k);
     walk = [];
   }
@@ -4018,6 +4018,7 @@ addEventListener('keydown', (e) => {
   )[k];
   if (item) {
     e.preventDefault();
+    if (!currentInteraction().capabilities.interact.allowed) return;
     game.use(item);
     updateUI();
     save();
@@ -4057,26 +4058,12 @@ function frame(now: number) {
     frameSeconds = 0;
   }
   updateTransfer(now);
-  if (transferStarted || game.dialogue) voiceUi.release();
-  if (
-    travel.active &&
-    (!started ||
-      paused ||
-      modal ||
-      game.dialogue ||
-      transferStarted ||
-      game.phase !== 'playing' ||
-      document.hidden)
-  )
-    travel.cancel(
-      document.hidden
-        ? 'background'
-        : game.phase !== 'playing'
-          ? 'death'
-          : game.dialogue
-            ? 'dialogue'
-            : 'menu',
-    );
+  const interaction = currentInteraction();
+  if (!interaction.capabilities.voice.allowed) voiceUi.release();
+  if (travel.active && interaction.travelInterruption) {
+    travel.cancel(interaction.travelInterruption);
+    travelTarget = undefined;
+  }
   travelUi.update(
     travel.feedback,
     canUseMovementControls(),
@@ -4089,14 +4076,7 @@ function frame(now: number) {
     frameProfiler.record('audio', performance.now() - profileMark);
     profileMark = performance.now();
   }
-  if (
-    started &&
-    !paused &&
-    (!sharedActionPending || combatPending) &&
-    !game.dialogue &&
-    !transferStarted &&
-    !mobileViewport.diagnostics.portraitRequired
-  ) {
+  if (interaction.capabilities.simulate.allowed) {
     let x =
         Number(keys.has('d') || keys.has('arrowright')) -
         Number(keys.has('a') || keys.has('arrowleft')),
@@ -4110,8 +4090,9 @@ function frame(now: number) {
       x = touchInput.x;
       y = touchInput.y;
     }
+    if (!interaction.capabilities.move.allowed) x = y = 0;
     if (heldAttack && game.player.attackCooldown <= 0 && !game.preparingTechnique) act('attack');
-    if (walk.length && !x && !y) {
+    if (interaction.capabilities.move.allowed && walk.length && !x && !y) {
       const next = walk[0],
         dx = next.x - game.player.x,
         dy = next.y - game.player.y,
@@ -4321,6 +4302,7 @@ Object.defineProperty(window, 'stichos', {
         notebook: { ...notebookView },
         player: game.player,
         phase: game.phase,
+        interaction: currentInteraction(),
         time: game.time,
         worldTime: game.worldTime,
         fauna: game.fauna,

@@ -231,6 +231,69 @@ test('actors change spaces only through an explicit transition and dead identiti
   assert.equal(ledger.setDestination('migrant', { spaceId: 'surface', x: 1, y: 1 }), false);
 });
 
+test('explicitly retrying an unreachable actor destination resumes without restarting synchronized journeys', () => {
+  let sealed = true;
+  const world: NavigationWorld = {
+    cell: (x, y) => ({
+      kind: Math.abs(y) > 3 || x < -3 || x > 6 || (sealed && x === 2) ? 'blocked' : 'open',
+    }),
+  };
+  const ledger = new ActorLedger<Body>(),
+    target = { spaceId: 'surface', x: 4, y: 0 };
+  ledger.register(body(), 'npc', 0);
+  ledger.setDestination('migrant', target);
+  let time = 0;
+  for (; time < 3000 && ledger.get('migrant')!.state !== 'unreachable'; time++)
+    ledger.advance(time + 1, () => world);
+  assert.equal(ledger.get('migrant')!.state, 'unreachable');
+
+  sealed = false;
+  const failed = ledger.get('migrant')!;
+  for (let tick = 0; tick < 30; tick++) {
+    ledger.setDestination('migrant', target);
+    ledger.advance(++time, () => world);
+  }
+  assert.deepEqual(
+    ledger.get('migrant'),
+    failed,
+    'Routine intention synchronization cannot poll or reset a failed route.',
+  );
+  assert.equal(ledger.setDestination('migrant', target, { retry: true }), true);
+  assert.equal(ledger.get('migrant')!.state, 'planning');
+  assert.equal(ledger.get('migrant')!.revision, failed.revision + 1);
+
+  let reached = false;
+  const observed = new Set<string>();
+  for (let tick = 0; tick < 3000; tick++) {
+    const before = ledger.get('migrant')!;
+    observed.add(before.state);
+    assert.equal(ledger.setDestination('migrant', target), true);
+    assert.equal(ledger.setDestination('migrant', target, { retry: true }), true);
+    assert.deepEqual(
+      ledger.get('migrant'),
+      before,
+      'Identical active intentions preserve all progress.',
+    );
+    ledger.advance(++time, () => world);
+    const after = ledger.get('migrant')!;
+    assert.ok(
+      Math.hypot(after.x - before.x, after.y - before.y) <= ACTOR_LEDGER_RULES.maxCoarseDistance,
+    );
+    assert.notEqual(world.cell(Math.round(after.x), Math.round(after.y)).kind, 'blocked');
+    assert.ok(ledger.diagnostics.navigators <= ACTOR_LEDGER_RULES.maxNavigators);
+    if (after.state === 'arrived') {
+      reached = true;
+      break;
+    }
+  }
+  assert.ok(observed.has('planning'));
+  assert.ok(observed.has('traveling'));
+  assert.ok(reached, 'Retry must reach the same target through the now-open passage.');
+  const arrived = ledger.get('migrant')!;
+  ledger.setDestination('migrant', target, { retry: true });
+  assert.deepEqual(ledger.get('migrant'), arrived, 'Completed intentions remain idempotent.');
+});
+
 test('ledger admission saturation never erases existing identity, and malformed saves are rejected', () => {
   const ledger = new ActorLedger<Body>();
   for (let i = 0; i < ACTOR_LEDGER_RULES.maxActors; i++)
