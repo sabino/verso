@@ -33,6 +33,7 @@ import {
 import type { CivilBuildingKind, Sprite } from './art.ts';
 import { drawHomeDecoration, homeDecorations } from './progression-art.ts';
 import { effectActor } from './actor-motion.ts';
+import { cameraFrame } from './camera-motion.ts';
 import type { HumanoidAction, HumanoidActionKind } from './actor-motion.ts';
 
 interface Building {
@@ -65,6 +66,7 @@ export class StichosRenderer {
   private ratio = 1;
   private viewZoom = 1;
   private camera: Point = { x: 0, y: 5 };
+  private pixelCamera: Point = { x: 0, y: 5 };
   private art = new StichosArt();
   private roofs = new Map<string, Roof>();
   private buildingBounds = new Map<string, Building>();
@@ -95,6 +97,7 @@ export class StichosRenderer {
   private combatFeedback = new CombatFeedback();
   private cameraImpulse: Point = { x: 0, y: 0 };
   private canopySubjects: (Point & { worldY: number })[] = [];
+  private nameplateBounds: { left: number; right: number; top: number; bottom: number }[] = [];
   get feedbackDiagnostics() {
     return this.combatFeedback.diagnostics;
   }
@@ -125,14 +128,14 @@ export class StichosRenderer {
   }
   worldToScreen(p: Point): Point {
     return {
-      x: this.width / 2 + (p.x - this.camera.x) * this.unit + this.cameraImpulse.x,
-      y: this.height * 0.58 + (p.y - this.camera.y) * this.unit + this.cameraImpulse.y,
+      x: this.width / 2 + (p.x - this.pixelCamera.x) * this.unit + this.cameraImpulse.x,
+      y: this.height * 0.58 + (p.y - this.pixelCamera.y) * this.unit + this.cameraImpulse.y,
     };
   }
   screenToWorld(p: Point): Point {
     return {
-      x: (p.x - this.width / 2 - this.cameraImpulse.x) / this.unit + this.camera.x,
-      y: (p.y - this.height * 0.58 - this.cameraImpulse.y) / this.unit + this.camera.y,
+      x: (p.x - this.width / 2 - this.cameraImpulse.x) / this.unit + this.pixelCamera.x,
+      y: (p.y - this.height * 0.58 - this.cameraImpulse.y) / this.unit + this.pixelCamera.y,
     };
   }
 
@@ -170,6 +173,7 @@ export class StichosRenderer {
       this.worldSeed = game.world.seed;
       this.worldGeneration = game.world.generation;
       this.camera = { x: game.player.x, y: game.player.y };
+      this.pixelCamera = { ...this.camera };
       this.roofs.clear();
       this.buildingBounds.clear();
       this.chunkBuildings.clear();
@@ -223,14 +227,16 @@ export class StichosRenderer {
         tool: effect.tool,
       });
     }
-    const follow = options.reducedMotion
-      ? 1
-      : this.previousPlayer === null
-        ? 1
-        : 1 - Math.exp(-Math.max(dt, 0.016) * 12);
+    const camera = cameraFrame(
+      this.camera,
+      game.player,
+      dt,
+      unit,
+      !!options.reducedMotion || this.previousPlayer === null,
+    );
     this.playerSite = game.world.tile(game.player.x, game.player.y).site;
-    this.camera.x += (game.player.x - this.camera.x) * follow;
-    this.camera.y += (game.player.y - this.camera.y) * follow;
+    this.camera = camera.position;
+    this.pixelCamera = camera.pixel;
     this.combatFeedback.update(
       game.time,
       game.effects,
@@ -273,9 +279,7 @@ export class StichosRenderer {
       options.combatCues,
     );
     this.cameraImpulse = this.combatFeedback.cameraOffset();
-    // Quantized camera preserves crisp pixel clusters without resampling the art.
-    this.camera.x = Math.round(this.camera.x * unit) / unit;
-    this.camera.y = Math.round(this.camera.y * unit) / unit;
+    // The projected image remains pixel aligned; the follow state keeps subpixel motion.
     // Project once per frame, not once per tree. Only nearby live threats and
     // companions reveal their silhouette through vegetation; walls stay opaque.
     this.canopySubjects = [
@@ -303,6 +307,8 @@ export class StichosRenderer {
     ctx.globalCompositeOperation = 'source-over';
     ctx.fillStyle = '#b8cada';
     ctx.fillRect(0, 0, this.width, this.height);
+    // NPCs are depth sorted, so reserve the player's name before any of them draw.
+    this.nameplateBounds = [this.nameplate(game.player).bounds];
     const underground = game.underworldFrame;
     if (underground) {
       // Match the surface camera's portrait framing, including its low player anchor.
@@ -1452,6 +1458,27 @@ export class StichosRenderer {
     ctx.fillStyle = '#abe2dc';
     ctx.fillText(label, p.x, y);
   }
+  private nameplate(person: Npc | Stichos['player']) {
+    const p = this.worldToScreen(person);
+    const s = (this.unit / 32) * 1.35;
+    const label = person.name.split(' ')[0];
+    const previousFont = this.ctx.font;
+    this.ctx.font = `${Math.max(10, Math.round(10 * Math.sqrt(this.viewZoom)))}px "Courier New",monospace`;
+    const width = Math.ceil(this.ctx.measureText(label).width + 8);
+    this.ctx.font = previousFont;
+    const y = p.y - 44 * s * person.appearance.height;
+    return {
+      label,
+      y,
+      width,
+      bounds: {
+        left: p.x - width / 2,
+        right: p.x + width / 2,
+        top: y - 11,
+        bottom: y + 6,
+      },
+    };
+  }
   private person(game: Stichos, person: Npc | Stichos['player'], player: boolean) {
     const p = this.worldToScreen(person),
       s = (this.unit / 32) * 1.35,
@@ -1541,30 +1568,36 @@ export class StichosRenderer {
     ctx.restore();
     const near = Math.hypot(person.x - game.player.x, person.y - game.player.y) < 4;
     if (player || near || (person as Npc).hostile) {
-      const label = person.name.split(' ')[0];
+      const plate = this.nameplate(person);
       ctx.font = `${Math.max(10, Math.round(10 * Math.sqrt(this.viewZoom)))}px "Courier New",monospace`;
       ctx.textAlign = 'center';
       ctx.textBaseline = 'bottom';
-      const labelY = p.y - 44 * s * person.appearance.height;
-      ctx.fillStyle = '#172e40bb';
-      ctx.fillRect(
-        Math.round(p.x - ctx.measureText(label).width / 2 - 4),
-        Math.round(labelY - 11),
-        Math.ceil(ctx.measureText(label).width + 8),
-        13,
-      );
-      ctx.fillStyle = player ? '#f0e7c9' : (person as Npc).hostile ? '#efb9a9' : '#d8e1d8';
-      ctx.fillText(label, Math.round(p.x), Math.round(labelY));
-      if (person.hp < person.maxHp || player) {
-        rect(ctx, p.x - 11 * s, labelY + 3, 22 * s, 3, '#253746');
-        rect(
-          ctx,
-          p.x - 10 * s,
-          labelY + 4,
-          (20 * s * person.hp) / person.maxHp,
-          1,
-          player ? '#b86f65' : '#a2c0a3',
+      const clear =
+        player ||
+        !this.nameplateBounds.some(
+          (other) =>
+            plate.bounds.left < other.right + 3 &&
+            plate.bounds.right > other.left - 3 &&
+            plate.bounds.top < other.bottom + 3 &&
+            plate.bounds.bottom > other.top - 3,
         );
+      if (clear) {
+        if (!player) this.nameplateBounds.push(plate.bounds);
+        ctx.fillStyle = '#172e40bb';
+        ctx.fillRect(Math.round(plate.bounds.left), Math.round(plate.y - 11), plate.width, 13);
+        ctx.fillStyle = player ? '#f0e7c9' : (person as Npc).hostile ? '#efb9a9' : '#d8e1d8';
+        ctx.fillText(plate.label, Math.round(p.x), Math.round(plate.y));
+        if (person.hp < person.maxHp || player) {
+          rect(ctx, p.x - 11 * s, plate.y + 3, 22 * s, 3, '#253746');
+          rect(
+            ctx,
+            p.x - 10 * s,
+            plate.y + 4,
+            (20 * s * person.hp) / person.maxHp,
+            1,
+            player ? '#b86f65' : '#a2c0a3',
+          );
+        }
       }
     }
     const breath = this.reducedMotion
@@ -2868,7 +2901,10 @@ export class StichosRenderer {
       }
     } else if (effect.kind === 'harvest') {
       const craft = this.effectActors.get(effect.id)?.kind === 'craft';
-      const count = this.reducedMotion ? 3 : 7;
+      // A tool stroke has one visible material contact, timed with its physical sound.
+      const contact = effect.tool ? clamp((t - 0.36) / 0.12, 0, 1) : 1;
+      ctx.globalAlpha *= contact;
+      const count = effect.tool ? (this.reducedMotion ? 2 : 5) : this.reducedMotion ? 3 : 7;
       for (let i = 0; i < count; i++) {
         const a = i * 2.399 + (effect.id % 7),
           reach = (craft ? 6 : 4) + motionT * (craft ? 12 : 15),
@@ -2879,7 +2915,31 @@ export class StichosRenderer {
               motionT * 13 +
               motionT * motionT * 10) *
             s;
-        if (craft) {
+        if (effect.tool?.kind === 'pickaxe') {
+          // Stone breaks into cool angular chips and short, heavy dust below the blow.
+          poly(
+            ctx,
+            [
+              [x, y],
+              [x + 3 * s, y - 2 * s],
+              [x + 2 * s, y + 2 * s],
+            ],
+            i % 2 ? '#b7b6ad' : '#788d93',
+          );
+          rect(ctx, x - s, y + 3 * s, 2 * s, s, '#aba89a');
+        } else if (effect.tool?.kind === 'axe') {
+          // Split timber carries long ochre splinters in the direction of the strike.
+          line(
+            ctx,
+            x - 2 * s,
+            y + 3 * s,
+            x + (i % 2 ? 4 : 2) * s,
+            y - 2 * s,
+            i % 2 ? '#d3ac73' : '#8f6748',
+            s,
+          );
+          rect(ctx, x, y, 2 * s, s, '#ead1a0');
+        } else if (craft) {
           rect(ctx, x, y, s, 3 * s, i % 2 ? '#d8d8a5' : '#b4cbb5');
           rect(ctx, x - s, y + s, 3 * s, s, '#e2dbb4');
         } else {

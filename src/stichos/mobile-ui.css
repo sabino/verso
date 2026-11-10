@@ -32,6 +32,18 @@ summary:focus-visible {
   flex: 1;
   min-width: 0;
 }
+.solo #v-voice-mount {
+  flex: none;
+}
+.solo #v-voice-mount .v-voice-mode,
+.solo #v-ptt,
+.solo #v-voice-status,
+.solo #v-voice-speakers {
+  display: none;
+}
+.solo .v-comms-dock {
+  justify-content: flex-end;
+}
 .v-comms-dock .v-voice {
   padding: 0;
   border: 0;
@@ -41,6 +53,9 @@ summary:focus-visible {
   min-height: 40px;
   min-width: 44px;
   padding: 4px 8px;
+}
+#s-mobile-thread {
+  display: none;
 }
 .s-shell {
   grid-template-rows: 42px minmax(0, 1fr) 178px 62px;
@@ -291,6 +306,37 @@ summary:focus-visible {
   .s-mobile-status {
     left: 10px;
     max-width: calc(100% - 55px);
+  }
+  #s-mobile-thread {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    position: absolute;
+    top: 86px;
+    left: 10px;
+    width: min(250px, calc(100% - 110px));
+    min-height: 44px;
+    padding: 5px 9px;
+    text-align: left;
+    background: #142a35d9;
+    border: 1px solid #9a9877aa;
+    color: #e9dfbb;
+    font:
+      11px/1.25 'Courier New',
+      monospace;
+  }
+  #s-mobile-thread small {
+    color: #b6c6bb;
+    font-size: 9px;
+  }
+  #s-mobile-thread span {
+    max-width: 100%;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+  .chat-editing #s-mobile-thread {
+    display: none;
   }
   .s-weather {
     font-size: 11px;

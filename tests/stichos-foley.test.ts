@@ -83,7 +83,7 @@ for (const [kind, tool, material] of [
     const first = game.drainEvents();
     const impact = first.find((e) => e.foley?.kind === 'tool-impact')!.foley!;
     assert.equal(impact.material, material);
-    assert.equal(impact.delay, 0.17);
+    assert.equal(impact.delay, 0.3, 'material contact follows the tool windup');
     assert.equal(first.filter((e) => e.foley?.kind === 'pickup').length, 0);
     game.interact(prop.id);
     assert.equal(game.drainEvents().filter((e) => e.foley?.kind === 'tool-impact').length, 0);
