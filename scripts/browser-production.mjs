@@ -67,7 +67,7 @@ async function connect(address, events = () => {}) {
     },
   };
 }
-async function traveler(name, seed = '3886') {
+async function traveler(name) {
   const { browserContextId } = await browser.send('Target.createBrowserContext');
   const { targetId } = await browser.send('Target.createTarget', {
     url: 'about:blank',
@@ -237,7 +237,8 @@ async function traveler(name, seed = '3886') {
   await focus();
   await wait("window.stichos?.state.modal==='title'", 'title ready');
   await read('document.fonts.ready.then(()=>true)');
-  await fill('#s-seed-input', seed);
+  // Theo's explicit entry selects the canonical Stíchos seed; the custom seed
+  // input belongs to generated residents and does not select his geography.
   await click('#v-theo-story');
   await wait('window.stichos.state.transfer', 'opening intro');
   await click('#s-skip');
@@ -443,10 +444,15 @@ try {
     `${((Date.now() - begun) / 1000).toFixed(1)} wall seconds`,
   );
   await c.shot('05-garden-ready');
-  const far = { x: site.x + 4, y: site.y };
+  const far = { x: site.x + 6, y: site.y };
   const walkable = await c.read(`!window.stichos.blocked(${far.x},${far.y})`);
   if (walkable) {
     await approach({ ...far, id: 'distant viewing point' });
+    const distantPlayer = (await c.state()).player;
+    assert.ok(
+      Math.hypot(distantPlayer.x - site.x, distantPlayer.y - site.y) > 3,
+      'The real player is outside the platform collection radius',
+    );
     await c.click('#v-work');
     assert(await c.read(`document.querySelector('[data-machine-collect="${id}"]').disabled`));
     await c.click('#v-work-close');
