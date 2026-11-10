@@ -7,6 +7,7 @@ import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
 import { measureStableClickTarget } from './browser-harness.mjs';
+import { routeBeyondDistance } from './browser-route.mjs';
 const endpoint = process.argv[2],
   url = process.argv[3] || 'http://localhost:4174/';
 if (
@@ -444,20 +445,22 @@ try {
     `${((Date.now() - begun) / 1000).toFixed(1)} wall seconds`,
   );
   await c.shot('05-garden-ready');
-  const far = { x: site.x + 6, y: site.y };
-  const walkable = await c.read(`!window.stichos.blocked(${far.x},${far.y})`);
-  if (walkable) {
-    await approach({ ...far, id: 'distant viewing point' });
-    const distantPlayer = (await c.state()).player;
-    assert.ok(
-      Math.hypot(distantPlayer.x - site.x, distantPlayer.y - site.y) > 3,
-      'The real player is outside the platform collection radius',
-    );
-    await c.click('#v-work');
-    assert(await c.read(`document.querySelector('[data-machine-collect="${id}"]').disabled`));
-    await c.click('#v-work-close');
-    pass('A distant output cannot be collected remotely');
-  }
+  // A clear distant tile can belong to a disconnected pocket. Select it from
+  // the player's reachable component and walk the exact discovered route.
+  const farRoute = await c.read(
+    `(${routeBeyondDistance.toString()})(window.stichos.state.player,${JSON.stringify(site)},(x,y)=>window.stichos.blocked(x,y))`,
+  );
+  assert.ok(farRoute, 'A reachable distant viewing point exists in this starter world');
+  for (const point of farRoute) await keyWalk(point);
+  const distantPlayer = (await c.state()).player;
+  assert.ok(
+    Math.hypot(distantPlayer.x - site.x, distantPlayer.y - site.y) > 3,
+    'The real player is outside the platform collection radius',
+  );
+  await c.click('#v-work');
+  assert(await c.read(`document.querySelector('[data-machine-collect="${id}"]').disabled`));
+  await c.click('#v-work-close');
+  pass('A distant output cannot be collected remotely');
   await approach({ ...site, id: 'garden' });
   await c.click('#v-work');
   await c.click(`[data-machine-collect="${id}"]`);
