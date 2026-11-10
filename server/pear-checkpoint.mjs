@@ -4,7 +4,7 @@ export function createPearCheckpointPublisher({
   token = process.env.VERSO_PEAR_BRIDGE_TOKEN,
   onError = () => {},
 } = {}) {
-  if (!url) return async () => {};
+  if (!url) return undefined;
   const endpoint = new URL('/api/checkpoints', url);
   if (!['http:', 'https:'].includes(endpoint.protocol) || endpoint.username || endpoint.password)
     throw Error('Invalid Pear checkpoint bridge URL.');
@@ -22,6 +22,7 @@ export function createPearCheckpointPublisher({
     } catch (error) {
       // Local durability has already committed. A replica outage must not roll back its revision.
       onError(error);
+      throw error; // The disk adapter tracks/retries this separately from local durability.
     }
   };
 }

@@ -24,6 +24,7 @@ import type { Appearance, Point } from './types';
 import type { WorldGeneration } from './world';
 import {
   getBrowserPlayerId,
+  browserPlayerIdentityStored,
   readRoomCredential,
   saveRoomCredential,
   loadSavedRoom,
@@ -39,6 +40,11 @@ import {
 } from './room-checkpoint.ts';
 import type { ChatChannel, RoomChat, ProductionMachine, RoomInfo } from './multiplayer-protocol.ts';
 export { getBrowserPlayerId, savedWorlds } from './room-storage.ts';
+import {
+  untrackedDurability,
+  validRoomDurability,
+  type RoomDurability,
+} from './room-durability.ts';
 
 export interface RoomIdentity {
   clientId?: string;
@@ -51,7 +57,16 @@ export interface RoomIdentity {
   combatActive?: boolean;
   progression?: SharedCombatProgression;
 }
+interface ConnectionDependencies {
+  loadSavedRoom?: typeof loadSavedRoom;
+  loadPeerTransport?: () => Promise<typeof import('./peer-transport').createPeerTransport>;
+  createWebSocket?: (url: URL) => WebSocket;
+}
 export class MultiplayerConnection {
+  private readonly dependencies: ConnectionDependencies;
+  constructor(dependencies: ConnectionDependencies = {}) {
+    this.dependencies = dependencies;
+  }
   actionExpansion = false;
   livingSystems = false;
   systemsFrame: LivingSystemsFrame | null = null;
@@ -109,6 +124,10 @@ export class MultiplayerConnection {
   onNetworkChange: () => void = () => {};
   networkDiagnostic: Readonly<PeerNetworkDiagnostic> | null = null;
   lastError = '';
+  durability: Readonly<RoomDurability> = untrackedDurability();
+  credentialStorageError: string | null = null;
+  onStorageChange: () => void = () => {};
+  private identityStorageFailed = false;
   private serial = 0;
   private epoch = 0;
   private cancelConnect: (() => void) | null = null;
@@ -141,13 +160,28 @@ export class MultiplayerConnection {
     return this.chats;
   }
   private persistCredential() {
-    if (this.room && this.resumeToken)
-      saveRoomCredential(this.endpoint, this.room, {
+    if (this.room && this.resumeToken) {
+      if (
+        this.identityStorageFailed &&
+        this.reconnectIdentity?.clientId === getBrowserPlayerId() &&
+        browserPlayerIdentityStored()
+      )
+        this.identityStorageFailed = false;
+      const saved = saveRoomCredential(this.endpoint, this.room, {
         token: this.resumeToken,
         peerId: this.peerId,
         serial: this.serial,
         authority: this.knownAuthority,
       });
+      const error =
+        !saved || this.identityStorageFailed
+          ? 'Your reconnect credential could not be saved. Keep this tab open; reloading may lose access to this shared life.'
+          : null;
+      if (error !== this.credentialStorageError) {
+        this.credentialStorageError = error;
+        this.onStorageChange();
+      }
+    }
   }
   room = '';
   peerId = '';
@@ -196,11 +230,13 @@ export class MultiplayerConnection {
     if (!peerHosted && (!['ws:', 'wss:'].includes(url.protocol) || url.username || url.password))
       throw Error('Use a valid ws:// or wss:// game server.');
     const normalizedEndpoint = peerHosted ? 'peer:' : url.href;
+    const sameWorld = this.endpoint === normalizedEndpoint && this.room === room;
     const stored = room ? readRoomCredential(normalizedEndpoint, room) : null;
     const token =
       forceHost && !hostedRestore ? '' : resume ? this.resumeToken : (stored?.token ?? '');
     this.serial = Math.max(this.serial, stored?.serial ?? 0);
     identity = { ...identity, clientId: identity.clientId ?? getBrowserPlayerId() };
+    this.identityStorageFailed = !browserPlayerIdentityStored(identity.clientId);
     this.disconnect(false);
     if (!resume) {
       this.room = room;
@@ -214,406 +250,495 @@ export class MultiplayerConnection {
     this.lastCombatAck = 0;
     this.lastError = '';
     this.networkDiagnostic = null;
+    if (!sameWorld) this.durability = untrackedDurability();
     this.status = 'connecting';
     this.onChange();
-    const pinned = room ? (await loadSavedRoom(room))?.checkpoint : undefined;
-    const pinnedKey =
-      forceHost && !hostedRestore
-        ? undefined
-        : (pinned?.authority ?? stored?.authority ?? (resume ? this.knownAuthority : undefined));
-    const peerFactory = peerHosted ? (await import('./peer-transport')).createPeerTransport : null;
-    if (epoch !== this.epoch)
-      throw new DOMException('The connection attempt was cancelled.', 'AbortError');
-    return new Promise((resolve, reject) => {
-      const socket = peerFactory
-        ? peerFactory(room, undefined, hostedRestore, forceHost)
-        : new WebSocket(url);
-      this.socket = socket;
-      let welcomed = false;
-      let failed = false;
-      let closed = false;
-      let settled = false;
-      let timeout: ReturnType<typeof setTimeout>;
-      const settle = (error?: Error) => {
-        if (settled) return;
-        settled = true;
-        if (error) failed = true;
-        clearTimeout(timeout);
-        if (this.cancelConnect === cancel) this.cancelConnect = null;
-        if (error) reject(error);
-        else resolve();
-      };
-      const cancel = () =>
-        settle(new DOMException('The connection attempt was cancelled.', 'AbortError'));
-      this.cancelConnect = cancel;
-      const diagnostic = () => (socket as RoomTransport).diagnostic;
-      const failureReason = (fallback: string) => diagnostic()?.error?.reason ?? fallback;
-      if (peerHosted)
-        (socket as RoomTransport).onstatuschange = () => {
-          if (failed || closed || epoch !== this.epoch) return;
-          this.networkDiagnostic = diagnostic() ?? null;
-          if (this.networkDiagnostic?.error) this.lastError = this.networkDiagnostic.error.reason;
-          this.onNetworkChange();
-        };
-      timeout = setTimeout(
-        () => {
-          if (epoch !== this.epoch) return cancel();
-          this.lastError = failureReason(
-            peerHosted && diagnostic()
-              ? peerFailure('timeout', diagnostic()!).reason
-              : 'The game server did not answer.',
-          );
-          settle(Error(this.lastError));
-          socket.close();
-        },
-        peerHosted ? PEER_CONNECT_TIMEOUT + 5000 : 10000,
-      );
-      const challenge = [...crypto.getRandomValues(new Uint8Array(32))]
-        .map((b) => b.toString(16).padStart(2, '0'))
-        .join('');
-      let joined = false;
-      const join = () => {
-        joined = true;
-        this.send({
-          type: 'join',
-          livingWorld: 1,
-          livingSystems: 1,
-          actionExpansion: ACTION_EXPANSION,
-          protocol: MULTIPLAYER_PROTOCOL,
-          ...identity,
-          room: forceHost && !hostedRestore ? undefined : room || undefined,
-          ...(this.publicWorld ? { publicWorld: true } : {}),
-          challenge,
-          resumeToken: (pinnedKey ? token : '') || undefined,
-        });
-      };
-      socket.onopen = () => {
-        if (failed || closed || epoch !== this.epoch) return;
-        if (pinnedKey && room)
-          this.send({ type: 'hello', room, protocol: MULTIPLAYER_PROTOCOL, challenge });
-        else join();
-      };
-      const consume = (message: ServerMessage) => {
-        if (message.type === 'welcome') {
-          if (
-            message.protocol !== MULTIPLAYER_PROTOCOL ||
-            typeof message.room !== 'string' ||
-            !/^[A-Z0-9]{4,16}$/.test(message.room) ||
-            !Array.isArray(message.peers) ||
-            message.peers.length > 8 ||
-            typeof message.peerId !== 'string' ||
-            typeof message.resumeToken !== 'string' ||
-            !/^[A-Za-z0-9_-]{32}$/.test(message.resumeToken) ||
-            !Array.isArray(message.removed) ||
-            message.removed.length > 16384 ||
-            !Array.isArray(message.opened) ||
-            message.opened.length > 16384 ||
-            message.seed !== identity.seed ||
-            message.generation !== identity.generation
-          ) {
-            clearTimeout(timeout);
-            settle(
-              Error(
-                'This room belongs to a different world. Enter its seed and generation before joining.',
-              ),
-            );
-            this.disconnect();
-            return;
+    let handshakeReady = false;
+    try {
+      const prepare = async () => ({
+        pinned:
+          hostedRestore?.checkpoint ??
+          (room
+            ? (await (this.dependencies.loadSavedRoom ?? loadSavedRoom)(room))?.checkpoint
+            : undefined),
+        peerFactory: peerHosted
+          ? await (this.dependencies.loadPeerTransport?.() ??
+              import('./peer-transport').then((module) => module.createPeerTransport))
+          : null,
+      });
+      const prepared =
+        room || peerHosted
+          ? await new Promise<Awaited<ReturnType<typeof prepare>>>((resolve, reject) => {
+              this.cancelConnect = () =>
+                reject(new DOMException('The connection attempt was cancelled.', 'AbortError'));
+              void prepare().then(resolve, reject);
+            })
+          : { pinned: undefined, peerFactory: null };
+      const { pinned, peerFactory } = prepared;
+      const pinnedKey =
+        forceHost && !hostedRestore
+          ? undefined
+          : (pinned?.authority ?? stored?.authority ?? (resume ? this.knownAuthority : undefined));
+      if (epoch !== this.epoch)
+        throw new DOMException('The connection attempt was cancelled.', 'AbortError');
+      this.cancelConnect = null;
+      return await new Promise<void>((resolve, reject) => {
+        const socket = peerFactory
+          ? peerFactory(room, undefined, hostedRestore, forceHost)
+          : (this.dependencies.createWebSocket?.(url) ?? new WebSocket(url));
+        this.socket = socket;
+        let welcomed = false;
+        let failed = false;
+        let closed = false;
+        let settled = false;
+        let timeout: ReturnType<typeof setTimeout>;
+        const settle = (error?: Error) => {
+          if (settled) return;
+          settled = true;
+          if (error) {
+            failed = true;
+            if (!closed && epoch === this.epoch) {
+              closed = true;
+              this.socket = null;
+              this.status = 'offline';
+              this.clearVoiceSession();
+              this.peerRecords.clear();
+              this.cancelClaims();
+              this.onChange();
+            }
           }
-          welcomed = true;
           clearTimeout(timeout);
-          this.status = 'online';
-          this.voiceCapability =
-            message.voice?.version === 1 && Array.isArray(message.voice.codecs)
-              ? message.voice
-              : null;
-          this.room = message.room;
-          this.actionExpansion = message.actionExpansion === ACTION_EXPANSION;
-          this.livingSystems = message.livingSystems === 1;
-          this.peerId = message.peerId;
-          this.resumeToken = message.resumeToken;
-          this.persistCredential();
-          this.chats = (Array.isArray(message.chat) ? message.chat : [])
-            .filter(validRoomChat)
-            .slice(-200);
-          this.machines =
-            Array.isArray(message.machines) &&
-            message.machines.length <= 256 &&
-            message.machines.every(validProductionMachine)
-              ? message.machines
-              : [];
-          this.onMachines(this.machines);
-          this.peerRecords = new Map(message.peers.map((peer) => [peer.id, peer]));
-          this.onWorld(message);
-          this.onChange();
-          this.onCombat(message.combat);
-          if (message.living) this.receiveLiving(message.living);
-          if (message.systems) this.receiveSystems(message.systems);
-          this.onVoiceSessionChange();
-          settle();
-        } else if (message.type === 'voice_ticket') {
-          const pending = this.voiceRequests.get(message.requestId);
-          if (
-            pending &&
-            /^[A-Za-z0-9_-]{43}$/.test(message.ticket) &&
-            Number.isFinite(message.expiresAt)
-          ) {
-            clearTimeout(pending.timer);
-            this.voiceRequests.delete(message.requestId);
-            pending.resolve({ ticket: message.ticket, expiresAt: message.expiresAt });
-          }
-        } else if (message.type === 'systems_correction') {
-          const p = message.location;
-          if (
-            this.livingSystems &&
-            p &&
-            typeof p.spaceId === 'string' &&
-            p.spaceId.length <= 160 &&
-            Number.isFinite(p.x) &&
-            Number.isFinite(p.y) &&
-            typeof message.reason === 'string'
-          )
-            this.onSystemsCorrection(p, message.reason);
-        } else if (message.type === 'peerJoined' || message.type === 'pose') {
-          this.peerRecords.set(message.peer.id, message.peer);
-          this.onChange();
-        } else if (message.type === 'peerLeft') {
-          this.peerRecords.delete(message.peerId);
-          this.onChange();
-        } else if (message.type === 'world') {
-          // The claimant applies its own successful local action after the acknowledgement.
-          if (message.actorId !== this.peerId) this.onWorld(message);
-        } else if (message.type === 'chat') {
-          if (
-            validRoomChat(message.message) &&
-            message.message.room === this.room &&
-            !this.chats.some((c) => c.id === message.message.id)
-          ) {
-            this.chats.push(message.message);
-            this.chats = this.chats.slice(-200);
-            this.onChat(message.message);
-          }
-        } else if (message.type === 'machines') {
-          if (
-            !Array.isArray(message.machines) ||
-            message.machines.length > 256 ||
-            !message.machines.every(validProductionMachine)
-          )
-            return;
-          this.machines = message.machines;
-          this.onMachines(this.machines);
-        } else if (message.type === 'checkpoint') {
-          if (message.checkpoint?.state?.room === this.room)
-            void saveRoomReplica(message.checkpoint).then((ok) => {
-              if (ok && epoch === this.epoch) this.onCheckpoint(message.checkpoint);
-            });
-        } else if (message.type === 'systems_events') {
-          if (this.livingSystems && validSystemSoundEvents(message.events))
-            this.onSystemEvents(message.events);
-        } else if (message.type === 'systems_frame') {
-          this.receiveSystems(message.frame);
-        } else if (message.type === 'living_frame') {
-          this.receiveLiving(message.frame);
-        } else if (message.type === 'combat_frame') {
-          this.onCombat(message.frame);
-        } else if (
-          message.type === 'systems_result' ||
-          message.type === 'claimResult' ||
-          message.type === 'combat_result' ||
-          message.type === 'chat_result'
-        ) {
-          if (message.type === 'combat_result') this.onCombat(message.frame);
-          if (message.type === 'systems_result' && message.frame)
-            this.receiveSystems(message.frame);
-          const request = this.pending.get(message.requestId);
-          if (request) {
-            clearTimeout(request.timer);
-            this.pending.delete(message.requestId);
-            request.resolve(message);
-          }
-        } else if (message.type === 'emote') this.onEmote(message.peerId, message.gesture);
-        else if (message.type === 'error') {
-          if (!welcomed) {
-            clearTimeout(timeout);
-            this.lastError = message.reason;
-            settle(Error(message.reason));
+          if (this.cancelConnect === cancel) this.cancelConnect = null;
+          if (error) reject(error);
+          else resolve();
+        };
+        const cancel = () =>
+          settle(new DOMException('The connection attempt was cancelled.', 'AbortError'));
+        this.cancelConnect = cancel;
+        const diagnostic = () => (socket as RoomTransport).diagnostic;
+        const failureReason = (fallback: string) => diagnostic()?.error?.reason ?? fallback;
+        if (peerHosted)
+          (socket as RoomTransport).onstatuschange = () => {
+            if (failed || closed || epoch !== this.epoch) return;
+            this.networkDiagnostic = diagnostic() ?? null;
+            if (this.networkDiagnostic?.error) this.lastError = this.networkDiagnostic.error.reason;
+            this.onNetworkChange();
+          };
+        timeout = setTimeout(
+          () => {
+            if (epoch !== this.epoch) return cancel();
+            this.lastError = failureReason(
+              peerHosted && diagnostic()
+                ? peerFailure('timeout', diagnostic()!).reason
+                : 'The game server did not answer.',
+            );
+            settle(Error(this.lastError));
             socket.close();
-          } else this.onMessage(message.reason);
-        }
-      };
-      let checkpointVerified = !pinned,
-        proofVerified = false,
-        verifying = false;
-      let liveAuthority: JsonWebKey | undefined;
-      let waiting: Extract<ServerMessage, { type: 'welcome' }> | null = null;
-      let queued: ServerMessage[] = [],
-        queuedBytes = 0;
-      const rejectPin = (reason: string) => {
-        this.lastError = reason;
-        failed = true;
-        clearTimeout(timeout);
-        queued = [];
-        waiting = null;
-        if (welcomed) this.onMessage(reason);
-        settle(Error(reason));
-        socket.close();
-      };
-      const finishWelcome = () => {
-        if (failed || epoch !== this.epoch || !waiting || !proofVerified || !checkpointVerified)
-          return;
-        const welcome = waiting;
-        waiting = null;
-        consume(welcome);
-        if (!welcomed) return;
-        for (const packet of queued) consume(packet);
-        queued = [];
-        queuedBytes = 0;
-      };
-      socket.onmessage = (event: { data: unknown }) => {
-        if (
-          failed ||
-          epoch !== this.epoch ||
-          typeof event.data !== 'string' ||
-          event.data.length > 4_000_000
-        )
-          return;
-        let message: ServerMessage;
-        try {
-          message = JSON.parse(event.data);
-        } catch {
-          return;
-        }
-        if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
-        if (!welcomed) {
-          if (message.type === 'error') {
-            consume(message);
-            return;
-          }
-          if (message.type === 'room_info' && pinnedKey && !joined) {
-            const binding = (socket as RoomTransport).channelBinding ?? '';
-            void verifyRoomHello(message.proof, challenge, room, binding, pinnedKey).then((ok) => {
-              if (failed || epoch !== this.epoch || socket.readyState !== 1 || joined) return;
-              if (!ok)
-                return rejectPin(
-                  'The live room could not prove its signing key. Your private reconnect credential was not sent.',
-                );
-              if (
-                message.info?.seed !== identity.seed ||
-                message.info?.generation !== identity.generation
-              )
-                return rejectPin('This room belongs to a different generated planet.');
-              join();
-            });
-            return;
-          }
-          if (message.type === 'welcome') {
-            if (waiting) return rejectPin('The room repeated its identity handshake.');
-            waiting = message;
-            const binding = (socket as RoomTransport).channelBinding ?? '';
-            void verifyRoomHello(
-              message.proof,
-              challenge,
-              room || message.room,
-              binding,
-              pinnedKey,
-            ).then((ok) => {
-              if (failed || epoch !== this.epoch || socket.readyState !== 1) return;
-              if (!ok)
-                return rejectPin(
-                  'The live room could not prove its signing key for this connection. No room state was applied.',
-                );
-              liveAuthority = message.proof!.authority;
-              this.knownAuthority = liveAuthority;
-              proofVerified = true;
-              finishWelcome();
-            });
-            return;
-          }
-          if (message.type === 'checkpoint' && pinned && !checkpointVerified) {
-            if (verifying) return;
-            verifying = true;
-            void verifyRoomCheckpoint(message.checkpoint, pinned).then((ok) => {
-              if (failed || epoch !== this.epoch || socket.readyState !== 1) return;
-              if (!ok)
-                return rejectPin(
-                  'This room could not prove the saved world’s signing authority. Its live state was not applied.',
-                );
-              checkpointVerified = true;
-              queued.push(message);
-              finishWelcome();
-            });
-            return;
-          }
-          queuedBytes += event.data.length;
-          if (queued.length >= 128 || queuedBytes > 8_000_000)
-            return rejectPin('The room sent too much state before proving its saved world.');
-          queued.push(message);
-          return;
-        }
-        if (
-          message.type === 'checkpoint' &&
-          liveAuthority &&
-          (message.checkpoint?.authority?.x !== liveAuthority.x ||
-            message.checkpoint?.authority?.y !== liveAuthority.y)
-        )
-          return rejectPin('The room changed its signing authority during this connection.');
-        consume(message);
-      };
-      socket.onerror = () => {
-        if (failed || closed || epoch !== this.epoch) return;
-        failed = true;
-        clearTimeout(timeout);
-        this.lastError = failureReason(
-          peerHosted
-            ? 'Could not reach that browser room. Keep the host’s game open and retry.'
-            : 'Cannot reach the game server.',
+          },
+          peerHosted ? PEER_CONNECT_TIMEOUT + 5000 : 10000,
         );
-        if (!welcomed) settle(Error(this.lastError));
-        socket.close();
-      };
-      socket.onclose = () => {
-        clearTimeout(timeout);
-        if (closed || epoch !== this.epoch) return;
-        closed = true;
-        failed = true;
-        this.socket = null;
-        this.status = welcomed ? 'disconnected' : 'offline';
-        this.clearVoiceSession();
-        this.peerRecords.clear();
-        this.cancelClaims();
-        this.onChange();
-        if (welcomed)
-          this.onMessage(
-            'The shared signal was interrupted. Reconnect from Together before gathering again.',
+        const challenge = [...crypto.getRandomValues(new Uint8Array(32))]
+          .map((b) => b.toString(16).padStart(2, '0'))
+          .join('');
+        let joined = false;
+        const join = () => {
+          joined = true;
+          this.send({
+            type: 'join',
+            livingWorld: 1,
+            livingSystems: 1,
+            actionExpansion: ACTION_EXPANSION,
+            protocol: MULTIPLAYER_PROTOCOL,
+            ...identity,
+            room: forceHost && !hostedRestore ? undefined : room || undefined,
+            ...(this.publicWorld ? { publicWorld: true } : {}),
+            challenge,
+            resumeToken: (pinnedKey ? token : '') || undefined,
+          });
+        };
+        socket.onopen = () => {
+          if (failed || closed || epoch !== this.epoch) return;
+          if (pinnedKey && room)
+            this.send({ type: 'hello', room, protocol: MULTIPLAYER_PROTOCOL, challenge });
+          else join();
+        };
+        const consume = (message: ServerMessage) => {
+          if (message.type === 'welcome') {
+            if (
+              message.protocol !== MULTIPLAYER_PROTOCOL ||
+              typeof message.room !== 'string' ||
+              !/^[A-Z0-9]{4,16}$/.test(message.room) ||
+              !Array.isArray(message.peers) ||
+              message.peers.length > 8 ||
+              typeof message.peerId !== 'string' ||
+              typeof message.resumeToken !== 'string' ||
+              !/^[A-Za-z0-9_-]{32}$/.test(message.resumeToken) ||
+              !Array.isArray(message.removed) ||
+              message.removed.length > 16384 ||
+              !Array.isArray(message.opened) ||
+              message.opened.length > 16384 ||
+              message.seed !== identity.seed ||
+              message.generation !== identity.generation
+            ) {
+              clearTimeout(timeout);
+              settle(
+                Error(
+                  'This room belongs to a different world. Enter its seed and generation before joining.',
+                ),
+              );
+              this.disconnect();
+              return;
+            }
+            welcomed = true;
+            clearTimeout(timeout);
+            this.status = 'online';
+            this.voiceCapability =
+              message.voice?.version === 1 && Array.isArray(message.voice.codecs)
+                ? message.voice
+                : null;
+            this.room = message.room;
+            this.durability = validRoomDurability(message.durability)
+              ? { ...message.durability }
+              : untrackedDurability();
+            this.onStorageChange();
+            this.actionExpansion = message.actionExpansion === ACTION_EXPANSION;
+            this.livingSystems = message.livingSystems === 1;
+            this.peerId = message.peerId;
+            this.resumeToken = message.resumeToken;
+            this.persistCredential();
+            this.chats = (Array.isArray(message.chat) ? message.chat : [])
+              .filter(validRoomChat)
+              .slice(-200);
+            this.machines =
+              Array.isArray(message.machines) &&
+              message.machines.length <= 256 &&
+              message.machines.every(validProductionMachine)
+                ? message.machines
+                : [];
+            this.onMachines(this.machines);
+            this.peerRecords = new Map(message.peers.map((peer) => [peer.id, peer]));
+            this.onWorld(message);
+            this.onChange();
+            this.onCombat(message.combat);
+            if (message.living) this.receiveLiving(message.living);
+            if (message.systems) this.receiveSystems(message.systems);
+            this.onVoiceSessionChange();
+            settle();
+          } else if (message.type === 'voice_ticket') {
+            const pending = this.voiceRequests.get(message.requestId);
+            if (
+              pending &&
+              /^[A-Za-z0-9_-]{43}$/.test(message.ticket) &&
+              Number.isFinite(message.expiresAt)
+            ) {
+              clearTimeout(pending.timer);
+              this.voiceRequests.delete(message.requestId);
+              pending.resolve({ ticket: message.ticket, expiresAt: message.expiresAt });
+            }
+          } else if (message.type === 'systems_correction') {
+            const p = message.location;
+            if (
+              this.livingSystems &&
+              p &&
+              typeof p.spaceId === 'string' &&
+              p.spaceId.length <= 160 &&
+              Number.isFinite(p.x) &&
+              Number.isFinite(p.y) &&
+              typeof message.reason === 'string'
+            )
+              this.onSystemsCorrection(p, message.reason);
+          } else if (message.type === 'peerJoined' || message.type === 'pose') {
+            this.peerRecords.set(message.peer.id, message.peer);
+            this.onChange();
+          } else if (message.type === 'peerLeft') {
+            this.peerRecords.delete(message.peerId);
+            this.onChange();
+          } else if (message.type === 'world') {
+            // The claimant applies its own successful local action after the acknowledgement.
+            if (message.actorId !== this.peerId) this.onWorld(message);
+          } else if (message.type === 'chat') {
+            if (
+              validRoomChat(message.message) &&
+              message.message.room === this.room &&
+              !this.chats.some((c) => c.id === message.message.id)
+            ) {
+              this.chats.push(message.message);
+              this.chats = this.chats.slice(-200);
+              this.onChat(message.message);
+            }
+          } else if (message.type === 'machines') {
+            if (
+              !Array.isArray(message.machines) ||
+              message.machines.length > 256 ||
+              !message.machines.every(validProductionMachine)
+            )
+              return;
+            this.machines = message.machines;
+            this.onMachines(this.machines);
+          } else if (message.type === 'durability') {
+            if (validRoomDurability(message.status)) {
+              this.durability = { ...message.status };
+              this.onStorageChange();
+            }
+          } else if (message.type === 'checkpoint') {
+            if (message.checkpoint?.state?.room === this.room)
+              void saveRoomReplica(message.checkpoint).then((ok) => {
+                if (ok && epoch === this.epoch) this.onCheckpoint(message.checkpoint);
+              });
+          } else if (message.type === 'systems_events') {
+            if (this.livingSystems && validSystemSoundEvents(message.events))
+              this.onSystemEvents(message.events);
+          } else if (message.type === 'systems_frame') {
+            this.receiveSystems(message.frame);
+          } else if (message.type === 'living_frame') {
+            this.receiveLiving(message.frame);
+          } else if (message.type === 'combat_frame') {
+            this.onCombat(message.frame);
+          } else if (
+            message.type === 'systems_result' ||
+            message.type === 'claimResult' ||
+            message.type === 'combat_result' ||
+            message.type === 'chat_result'
+          ) {
+            if (message.type === 'combat_result') this.onCombat(message.frame);
+            if (message.type === 'systems_result' && message.frame)
+              this.receiveSystems(message.frame);
+            const request = this.pending.get(message.requestId);
+            if (request) {
+              clearTimeout(request.timer);
+              this.pending.delete(message.requestId);
+              request.resolve(message);
+            }
+          } else if (message.type === 'emote') this.onEmote(message.peerId, message.gesture);
+          else if (message.type === 'error') {
+            if (!welcomed) {
+              clearTimeout(timeout);
+              this.lastError = message.reason;
+              settle(Error(message.reason));
+              socket.close();
+            } else this.onMessage(message.reason);
+          }
+        };
+        let checkpointVerified = !pinned,
+          proofVerified = false,
+          verifying = false;
+        let liveAuthority: JsonWebKey | undefined;
+        let waiting: Extract<ServerMessage, { type: 'welcome' }> | null = null;
+        let queued: ServerMessage[] = [],
+          queuedBytes = 0;
+        const rejectPin = (reason: string) => {
+          this.lastError = reason;
+          failed = true;
+          clearTimeout(timeout);
+          queued = [];
+          waiting = null;
+          if (welcomed) this.onMessage(reason);
+          settle(Error(reason));
+          socket.close();
+        };
+        const finishWelcome = () => {
+          if (failed || epoch !== this.epoch || !waiting || !proofVerified || !checkpointVerified)
+            return;
+          const welcome = waiting;
+          waiting = null;
+          consume(welcome);
+          if (!welcomed) return;
+          for (const packet of queued) consume(packet);
+          queued = [];
+          queuedBytes = 0;
+        };
+        socket.onmessage = (event: { data: unknown }) => {
+          if (
+            failed ||
+            epoch !== this.epoch ||
+            typeof event.data !== 'string' ||
+            event.data.length > 4_000_000
+          )
+            return;
+          let message: ServerMessage;
+          try {
+            message = JSON.parse(event.data);
+          } catch {
+            return;
+          }
+          if (!message || typeof message !== 'object' || typeof message.type !== 'string') return;
+          if (!welcomed) {
+            if (message.type === 'error') {
+              consume(message);
+              return;
+            }
+            if (message.type === 'room_info' && pinnedKey && !joined) {
+              const binding = (socket as RoomTransport).channelBinding ?? '';
+              void verifyRoomHello(message.proof, challenge, room, binding, pinnedKey).then(
+                (ok) => {
+                  if (failed || epoch !== this.epoch || socket.readyState !== 1 || joined) return;
+                  if (!ok)
+                    return rejectPin(
+                      'The live room could not prove its signing key. Your private reconnect credential was not sent.',
+                    );
+                  if (
+                    message.info?.seed !== identity.seed ||
+                    message.info?.generation !== identity.generation
+                  )
+                    return rejectPin('This room belongs to a different generated planet.');
+                  join();
+                },
+              );
+              return;
+            }
+            if (message.type === 'welcome') {
+              if (waiting) return rejectPin('The room repeated its identity handshake.');
+              waiting = message;
+              const binding = (socket as RoomTransport).channelBinding ?? '';
+              void verifyRoomHello(
+                message.proof,
+                challenge,
+                room || message.room,
+                binding,
+                pinnedKey,
+              ).then((ok) => {
+                if (failed || epoch !== this.epoch || socket.readyState !== 1) return;
+                if (!ok)
+                  return rejectPin(
+                    'The live room could not prove its signing key for this connection. No room state was applied.',
+                  );
+                liveAuthority = message.proof!.authority;
+                this.knownAuthority = liveAuthority;
+                proofVerified = true;
+                finishWelcome();
+              });
+              return;
+            }
+            if (message.type === 'checkpoint' && pinned && !checkpointVerified) {
+              if (verifying) return;
+              verifying = true;
+              void verifyRoomCheckpoint(message.checkpoint, pinned).then((ok) => {
+                if (failed || epoch !== this.epoch || socket.readyState !== 1) return;
+                if (!ok)
+                  return rejectPin(
+                    'This room could not prove the saved world’s signing authority. Its live state was not applied.',
+                  );
+                checkpointVerified = true;
+                queued.push(message);
+                finishWelcome();
+              });
+              return;
+            }
+            queuedBytes += event.data.length;
+            if (queued.length >= 128 || queuedBytes > 8_000_000)
+              return rejectPin('The room sent too much state before proving its saved world.');
+            queued.push(message);
+            return;
+          }
+          if (
+            message.type === 'checkpoint' &&
+            liveAuthority &&
+            (message.checkpoint?.authority?.x !== liveAuthority.x ||
+              message.checkpoint?.authority?.y !== liveAuthority.y)
+          )
+            return rejectPin('The room changed its signing authority during this connection.');
+          consume(message);
+        };
+        socket.onerror = () => {
+          if (failed || closed || epoch !== this.epoch) return;
+          failed = true;
+          clearTimeout(timeout);
+          this.lastError = failureReason(
+            peerHosted
+              ? 'Could not reach that browser room. Keep the host’s game open and retry.'
+              : 'Cannot reach the game server.',
           );
-        else {
-          this.lastError ||= failureReason('The connection closed before joining the room.');
-          settle(Error(this.lastError));
+          if (!welcomed) settle(Error(this.lastError));
+          socket.close();
+        };
+        socket.onclose = () => {
+          clearTimeout(timeout);
+          if (closed || epoch !== this.epoch) return;
+          closed = true;
+          failed = true;
+          this.socket = null;
+          this.status = welcomed ? 'disconnected' : 'offline';
+          this.clearVoiceSession();
+          this.peerRecords.clear();
+          this.cancelClaims();
+          if (!welcomed)
+            this.lastError ||= failureReason('The connection closed before joining the room.');
+          this.onChange();
+          if (welcomed)
+            this.onMessage(
+              'The shared signal was interrupted. Reconnect from Together before gathering again.',
+            );
+          else {
+            settle(Error(this.lastError));
+          }
+        };
+        handshakeReady = true;
+      });
+    } catch (error) {
+      // Constructor/import/configuration failures happen before transport event ownership exists.
+      if (!handshakeReady && epoch === this.epoch) {
+        this.cancelConnect?.();
+        this.cancelConnect = null;
+        const socket = this.socket;
+        this.socket = null;
+        if (socket) {
+          socket.onclose = null;
+          socket.close();
         }
-      };
-    });
+        this.status = 'offline';
+        this.lastError =
+          error instanceof Error ? error.message : 'The connection could not be started.';
+        this.onChange();
+      }
+      throw error;
+    }
   }
-  async hostSavedWorld(roomCode: string, identity: RoomIdentity) {
-    const saved = await loadSavedRoom(roomCode);
-    if (!saved?.owner)
-      throw Error('Only the original browser authority can resume this saved world.');
-    if (
-      saved.checkpoint.state.seed !== identity.seed ||
-      saved.checkpoint.state.generation !== identity.generation
-    )
-      throw Error('Enter the saved world seed before hosting it.');
-    return this.connect('peer:', identity, roomCode, false, saved);
-  }
-  async hostPublicWorld(code: string, identity: RoomIdentity) {
+  private async prepareHostedWorld(code: string, identity: RoomIdentity, allowCreate: boolean) {
     code = code.trim().toUpperCase();
     if (!/^[A-Z0-9]{4,16}$/.test(code)) throw Error('Use a valid public world code.');
-    const saved = await loadSavedRoom(code);
-    if (saved?.owner) return this.hostSavedWorld(code, identity);
-    if (saved)
-      throw Error(
-        'This planet belongs to its saved signing authority. Its original host or world node must return.',
-      );
-    return this.connect('peer:', identity, code, false, undefined, true);
+    this.disconnect(false);
+    const epoch = ++this.epoch;
+    this.status = 'connecting';
+    this.lastError = '';
+    this.onChange();
+    try {
+      const saved = await new Promise<SavedRoom | null>((resolve, reject) => {
+        this.cancelConnect = () =>
+          reject(new DOMException('The connection attempt was cancelled.', 'AbortError'));
+        void (this.dependencies.loadSavedRoom ?? loadSavedRoom)(code).then(resolve, reject);
+      });
+      if (epoch !== this.epoch)
+        throw new DOMException('The connection attempt was cancelled.', 'AbortError');
+      if (saved?.owner) {
+        if (
+          saved.checkpoint.state.seed !== identity.seed ||
+          saved.checkpoint.state.generation !== identity.generation
+        )
+          throw Error('Enter the saved world seed before hosting it.');
+      } else if (!allowCreate)
+        throw Error('Only the original browser authority can resume this saved world.');
+      else if (saved)
+        throw Error(
+          'This planet belongs to its saved signing authority. Its original host or world node must return.',
+        );
+      this.cancelConnect = null;
+      return this.connect('peer:', identity, code, false, saved ?? undefined, !saved);
+    } catch (error) {
+      if (epoch === this.epoch) {
+        this.cancelConnect = null;
+        this.status = 'offline';
+        this.lastError =
+          error instanceof Error ? error.message : 'The saved world could not be loaded.';
+        this.onChange();
+      }
+      throw error;
+    }
+  }
+  hostSavedWorld(roomCode: string, identity: RoomIdentity) {
+    return this.prepareHostedWorld(roomCode, identity, false);
+  }
+  hostPublicWorld(code: string, identity: RoomIdentity) {
+    return this.prepareHostedWorld(code, identity, true);
   }
   joinPublicWorld(endpoint: string, code: string, identity: RoomIdentity) {
     if (endpoint === 'peer:') throw Error('A persistent public world needs a world node.');
@@ -652,6 +777,8 @@ export class MultiplayerConnection {
     this.status = 'offline';
     this.clearVoiceSession();
     if (forget) {
+      this.durability = untrackedDurability();
+      this.credentialStorageError = null;
       this.lastError = '';
       this.room = '';
       this.peerId = '';

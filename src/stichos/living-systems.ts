@@ -178,6 +178,17 @@ export function validSystemsCommand(v: unknown): v is SystemsCommand {
       id(v.factionId) &&
       id(v.npcId)
     );
+  if (
+    v.kind === 'property' &&
+    object(v.command) &&
+    ['reconcile-worker', 'retry-worker'].includes(String(v.command.kind))
+  )
+    return (
+      exact(['kind', 'command']) &&
+      Object.keys(v.command).every((key) => ['kind', 'propertyId', 'npcId'].includes(key)) &&
+      id(v.command.propertyId) &&
+      id(v.command.npcId)
+    );
   // The property authority validates every command field again before transactions.
   return (
     v.kind === 'property' &&
@@ -306,11 +317,13 @@ export class LivingSystems {
             buildingId: tile.building,
           };
         },
-        travel: (id, target) => {
+        journey: (id) => this.actors.get(id),
+        balance: (id) => this.economy.satchel(id),
+        travel: (id, target, options) => {
           const actor = this.actors.get(id);
           if (!actor || actor.state === 'dead') return 'unreachable';
+          this.actors.setDestination(id, target, options);
           if (distance(actor, target) < 0.6) return 'arrived';
-          this.actors.setDestination(id, target);
           return this.actors.get(id)?.state === 'unreachable' ? 'unreachable' : 'traveling';
         },
         legacyHome: (id) => (hooks.mode === 'solo' ? hooks.legacyHome?.(id) : undefined),
@@ -1876,7 +1889,7 @@ export class LivingSystems {
         .slice(0, 8)
         .map(([id, intent]) => ({ id, ...intent })),
       offers: [...this.offers.values()].filter((o) => distance(o, peer) < 24).slice(0, 12),
-      property: this.property.frame(peer.id, peer),
+      property: this.property.frame(peer.id, peer, this.elapsed),
       home: this.property.homeTarget(peer.id, this.elapsed) ?? null,
       diagnostics: {
         actors: this.actors.diagnostics,

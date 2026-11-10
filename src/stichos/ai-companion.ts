@@ -27,6 +27,8 @@ export class AICompanionError extends Error {
 /** Pairing capabilities remain only in this instance, never in storage or URLs. */
 export class AICompanion {
   private token = '';
+  private epoch = 0;
+  private pending = new Set<AbortController>();
   private readonly endpoint: string;
   private readonly transport: typeof fetch;
   constructor({
@@ -48,25 +50,61 @@ export class AICompanion {
         'invalid_endpoint',
       );
     this.endpoint = url.origin;
-    this.transport = transport;
+    // Browser fetch rejects an AICompanion instance as its receiver.
+    this.transport = (input, init) => transport(input, init);
   }
   get paired() {
     return !!this.token;
   }
-  private async request(path: string, body?: unknown) {
+  cancelPending() {
+    this.epoch++;
+    for (const request of this.pending) request.abort();
+    this.pending.clear();
+  }
+  private async request(path: string, body?: unknown, token = this.token) {
+    const epoch = this.epoch;
+    const controller = new AbortController();
+    this.pending.add(controller);
+    const signal = AbortSignal.any([controller.signal, AbortSignal.timeout(12000)]);
+    const cancelled = () =>
+      new AICompanionError('The companion request was cancelled.', 'cancelled');
+    let abort = () => {};
+    const aborted = new Promise<never>((_, reject) => {
+      abort = () =>
+        reject(
+          controller.signal.aborted
+            ? cancelled()
+            : new AICompanionError('The companion request timed out.', 'timeout'),
+        );
+      signal.addEventListener('abort', abort, { once: true });
+    });
+    try {
+      return await Promise.race([this.receive(path, body, token, epoch, signal), aborted]);
+    } finally {
+      signal.removeEventListener('abort', abort);
+      this.pending.delete(controller);
+    }
+  }
+  private async receive(
+    path: string,
+    body: unknown,
+    token: string,
+    epoch: number,
+    signal: AbortSignal,
+  ) {
     let response: Response;
     try {
       response = await this.transport(this.endpoint + path, {
         method: body === undefined ? 'GET' : 'POST',
         headers: {
           ...(body === undefined ? {} : { 'Content-Type': 'application/json' }),
-          ...(this.token ? { Authorization: `Bearer ${this.token}` } : {}),
+          ...(token ? { Authorization: `Bearer ${token}` } : {}),
         },
         body: body === undefined ? undefined : JSON.stringify(body),
         credentials: 'omit',
         cache: 'no-store',
         redirect: 'error',
-        signal: AbortSignal.timeout(12000),
+        signal,
       });
     } catch {
       throw new AICompanionError(
@@ -80,8 +118,10 @@ export class AICompanion {
     } catch {
       throw new AICompanionError('The companion returned an invalid response.', 'invalid_response');
     }
+    if (signal.aborted || epoch !== this.epoch)
+      throw new AICompanionError('The companion request was cancelled.', 'cancelled');
     if (!response.ok) {
-      if (response.status === 401) this.token = '';
+      if (response.status === 401 && this.token === token) this.token = '';
       throw new AICompanionError(
         typeof value.message === 'string' ? value.message : 'The companion rejected that request.',
         typeof value.code === 'string' ? value.code : 'request_failed',
@@ -95,6 +135,7 @@ export class AICompanion {
         'Paste the pairing code printed by your companion.',
         'invalid_code',
       );
+    this.cancelPending();
     const value = await this.request('/api/ai/pair', { code: code.trim() });
     if (typeof value.token !== 'string' || !/^[A-Za-z0-9_-]{43}$/.test(value.token))
       throw new AICompanionError(
@@ -130,11 +171,9 @@ export class AICompanion {
     return this.request('/api/ai/chat', question);
   }
   async disconnect(): Promise<void> {
-    if (!this.token) return;
-    try {
-      await this.request('/api/ai/disconnect', {});
-    } finally {
-      this.token = '';
-    }
+    const token = this.token;
+    this.cancelPending();
+    this.token = '';
+    if (token) await this.request('/api/ai/disconnect', {}, token);
   }
 }

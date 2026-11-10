@@ -7,6 +7,8 @@ import { spawn } from 'node:child_process';
 import { pathToFileURL } from 'node:url';
 import { verifyPortraitMobile } from './browser-portrait-mobile.mjs';
 import { captureFirstLifeBaseline, verifyFirstLife } from './browser-first-life.mjs';
+import { verifyEarlierRoutes } from './browser-earlier-routes.mjs';
+import { verifyPlatformRecovery } from './browser-platform-recovery.mjs';
 const pause = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 /** A port file can precede HTTP readiness, especially on a cold hosted runner. */
@@ -165,7 +167,7 @@ async function main() {
   const baselineServer = process.env.VERSO_BASELINE_DIST
     ? http.createServer(serve(path.resolve(process.env.VERSO_BASELINE_DIST)))
     : null;
-  let browser, profile, log;
+  let browser, profile, log, fixtureServer;
   try {
     await new Promise((resolve) => server.listen(0, '127.0.0.1', resolve));
     if (baselineServer)
@@ -208,6 +210,12 @@ async function main() {
       out,
     });
     await verifyFirstLife({ endpoint, url: `http://localhost:${server.address().port}/`, out });
+    await verifyEarlierRoutes({ endpoint, url: `http://localhost:${server.address().port}/`, out });
+    await verifyPlatformRecovery({
+      endpoint,
+      url: `http://localhost:${server.address().port}/`,
+      out,
+    });
     if (baselineServer)
       await captureFirstLifeBaseline({
         endpoint,
@@ -234,14 +242,58 @@ async function main() {
           : reject(Error(`Production browser route failed (code ${code}, signal ${signal})`)),
       );
     });
+    // The store harness deliberately imports source modules into an isolated DOM.
+    // Only its HTTP responses are fixtures; the main/earlier game routes above use dist.
+    const { createServer } = await import('vite');
+    fixtureServer = await createServer({
+      server: { host: '127.0.0.1', port: 0, strictPort: false },
+    });
+    await fixtureServer.listen();
+    await new Promise((resolve, reject) => {
+      const store = spawn(
+        process.execPath,
+        [
+          'scripts/browser-store-check.mjs',
+          endpoint,
+          `http://127.0.0.1:${fixtureServer.httpServer.address().port}`,
+        ],
+        {
+          stdio: 'inherit',
+          timeout: 90000,
+          killSignal: 'SIGTERM',
+          env: { ...process.env, VERSO_STORE_EVIDENCE: path.join(out, 'store') },
+        },
+      );
+      store.once('error', reject);
+      store.once('exit', (code, signal) =>
+        code === 0
+          ? resolve()
+          : reject(Error(`Store browser fixture failed (code ${code}, signal ${signal})`)),
+      );
+    });
   } finally {
-    browser?.kill('SIGTERM');
-    if (log !== undefined) fs.closeSync(log);
-    server.closeAllConnections();
-    await new Promise((resolve) => server.close(resolve));
-    if (baselineServer?.listening) {
-      baselineServer.closeAllConnections();
-      await new Promise((resolve) => baselineServer.close(resolve));
+    let cleanupTimer;
+    try {
+      if (fixtureServer)
+        await Promise.race([
+          fixtureServer.close(),
+          new Promise((_, reject) => {
+            cleanupTimer = setTimeout(
+              () => reject(Error('Store fixture server did not close within 10000 ms')),
+              10000,
+            );
+          }),
+        ]);
+    } finally {
+      clearTimeout(cleanupTimer);
+      browser?.kill('SIGTERM');
+      if (log !== undefined) fs.closeSync(log);
+      server.closeAllConnections();
+      await new Promise((resolve) => server.close(resolve));
+      if (baselineServer?.listening) {
+        baselineServer.closeAllConnections();
+        await new Promise((resolve) => baselineServer.close(resolve));
+      }
     }
   }
 }

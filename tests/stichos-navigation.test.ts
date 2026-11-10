@@ -366,3 +366,92 @@ test('same-tick repeated actor captures are read-only while actual body edits in
   ledger.update({ ...saved.actors[0].body, hp: 43 }, 10);
   assert.equal(ledger.get('migrant')!.revision, 1);
 });
+
+test('trusted checkpoint forks preserve records and detach body, destination, index and later mutations', () => {
+  const ledger = new ActorLedger<Body>();
+  ledger.register(body(), 'npc', 10);
+  ledger.setDestination('migrant', { spaceId: 'surface', x: 20, y: 0 });
+  const before = ledger.snapshot(),
+    copy = ledger.fork();
+  assert.deepEqual(copy.snapshot(), before);
+  copy.update({ ...body(), x: 4, hp: 43 }, 11);
+  copy.setDestination('migrant', { spaceId: 'surface', x: 40, y: 0 });
+  copy.register(body('other'), 'npc', 11);
+  assert.deepEqual(ledger.snapshot(), before);
+  assert.equal(ledger.query({ spaceId: 'surface', x: 0, y: 0 }, 1).length, 1);
+  assert.equal(copy.query({ spaceId: 'surface', x: 4, y: 0 }, 1).length, 1);
+  ledger.markDead('migrant');
+  assert.notEqual(copy.get('migrant')!.state, 'dead');
+  assert.equal(ledger.has('other'), false);
+});
+
+test('legacy arrived-away checkpoints resume during simulation while hydration and snapshots stay observational', () => {
+  const ledger = new ActorLedger<Body>();
+  ledger.register(body(), 'worker', 10);
+  ledger.setDestination('migrant', { spaceId: 'surface', x: 4, y: 0 });
+  const old = ledger.snapshot();
+  old.actors[0].state = 'arrived';
+  assert.equal(validActorLedgerSave(old, validBody), true);
+  const restored = new ActorLedger(old, validBody);
+  assert.deepEqual(restored.snapshot(), old);
+  restored.advance(11, () => flat);
+  assert.equal(restored.get('migrant')!.state, 'planning');
+  for (let t = 12; t < 100 && restored.get('migrant')!.state !== 'arrived'; t++)
+    restored.advance(t, () => flat);
+  assert.equal(restored.get('migrant')!.state, 'arrived');
+  assert.equal(restored.get('migrant')!.x, 4);
+});
+
+test('displacing an arrived actor reopens its remembered journey without inventing floor transitions', () => {
+  const ledger = new ActorLedger<Body>();
+  const target = { spaceId: 'surface', x: 4, y: 0 };
+  ledger.register(body(), 'worker', 0);
+  ledger.setDestination('migrant', target);
+  let time = 0;
+  while (++time < 500 && ledger.get('migrant')!.state !== 'arrived')
+    ledger.advance(time, () => flat);
+  const arrived = ledger.get('migrant')!;
+  assert.equal(arrived.state, 'arrived');
+  ledger.update({ ...arrived.body, hp: 43 }, ++time);
+  assert.equal(
+    ledger.get('migrant')!.state,
+    'arrived',
+    'non-spatial updates do not reopen a journey',
+  );
+  ledger.update({ ...arrived.body, x: target.x - 0.2 }, ++time);
+  assert.equal(
+    ledger.get('migrant')!.state,
+    'arrived',
+    'small position corrections remain inside arrival tolerance',
+  );
+  ledger.update({ ...arrived.body, x: 0 }, ++time);
+  assert.equal(ledger.get('migrant')!.state, 'planning');
+  assert.deepEqual(ledger.get('migrant')!.destination, target);
+  const displaced = ledger.snapshot();
+  const restored = new ActorLedger(displaced, validBody);
+  assert.deepEqual(restored.snapshot(), displaced);
+  restored.setDestination('migrant', target);
+  assert.deepEqual(
+    restored.snapshot(),
+    displaced,
+    'same-goal synchronization preserves the resumed search',
+  );
+  while (++time < 1000 && restored.get('migrant')!.state !== 'arrived')
+    restored.advance(time, () => flat);
+  assert.equal(restored.get('migrant')!.state, 'arrived');
+  assert.equal(
+    restored.transition('migrant', { spaceId: 'underground:fixture', x: 4, y: 0 }, ++time),
+    true,
+  );
+  assert.equal(restored.get('migrant')!.state, 'planning');
+  restored.advance(++time, () => flat);
+  assert.equal(restored.get('migrant')!.state, 'waiting');
+  assert.equal(
+    restored.get('migrant')!.spaceId,
+    'underground:fixture',
+    'navigation cannot manufacture a return to the destination floor',
+  );
+  restored.markDead('migrant');
+  restored.update({ ...arrived.body, x: 0 }, ++time);
+  assert.equal(restored.get('migrant')!.state, 'dead');
+});

@@ -18,8 +18,58 @@ export function effectAtlasFrame(cue: CombatCue) {
   return { row, column: Math.min(3, Math.floor(progress * 4)), progress };
 }
 
-let atlas: HTMLImageElement | null = null;
-let unavailable = false;
+export class EffectAtlasLoader {
+  private atlas: HTMLImageElement | null = null;
+  private attempts = 0;
+  private began = 0;
+  private retryAt = 0;
+  private phase: 'unrequested' | 'loading' | 'ready' | 'failed' = 'unrequested';
+  private readonly create: () => HTMLImageElement;
+  private readonly now: () => number;
+  constructor(create: () => HTMLImageElement, now = () => performance.now()) {
+    this.create = create;
+    this.now = now;
+  }
+  get status() {
+    return { phase: this.phase, attempts: this.attempts };
+  }
+  retry() {
+    this.atlas = null;
+    this.attempts = 0;
+    this.retryAt = 0;
+    this.phase = 'unrequested';
+  }
+  get() {
+    const now = this.now();
+    if (this.phase === 'loading' && now - this.began >= 10000) this.failed(this.atlas!);
+    if (this.phase === 'failed' && (now < this.retryAt || this.attempts >= 3)) return null;
+    if (!this.atlas) {
+      const image = this.create();
+      this.atlas = image;
+      this.attempts++;
+      this.began = now;
+      this.phase = 'loading';
+      image.decoding = 'async';
+      image.onerror = () => this.failed(image);
+      image.src = new URL('./assets/impact-atlas.webp', import.meta.url).href;
+    }
+    if (this.atlas.complete && this.atlas.naturalWidth > 0) {
+      this.phase = 'ready';
+      return this.atlas;
+    }
+    return null;
+  }
+  private failed(image: HTMLImageElement) {
+    if (this.atlas !== image) return;
+    this.atlas = null;
+    this.phase = 'failed';
+    this.retryAt = this.now() + this.attempts * 2000;
+  }
+}
+const atlasLoader = new EffectAtlasLoader(() => new Image());
+export const getEffectAtlasStatus = () => atlasLoader.status;
+export const retryEffectAtlas = () => atlasLoader.retry();
+if (typeof window !== 'undefined') window.addEventListener('online', retryEffectAtlas);
 /** Integer boundaries also cover generator outputs that are not divisible by four. */
 export function effectAtlasCell(width: number, height: number, row: number, column: number) {
   const x = Math.round((column * width) / 4);
@@ -32,16 +82,7 @@ export function effectAtlasCell(width: number, height: number, row: number, colu
   };
 }
 function loadedAtlas() {
-  if (unavailable || typeof Image === 'undefined') return null;
-  if (!atlas) {
-    atlas = new Image();
-    atlas.decoding = 'async';
-    atlas.onerror = () => {
-      unavailable = true;
-    };
-    atlas.src = new URL('./assets/impact-atlas.webp', import.meta.url).href;
-  }
-  return atlas.complete && atlas.naturalWidth > 0 ? atlas : null;
+  return typeof Image === 'undefined' ? null : atlasLoader.get();
 }
 
 /** At most one bounded draw per cue. Procedural fallbacks and safety warnings remain intact. */

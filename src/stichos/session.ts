@@ -1069,6 +1069,9 @@ export class Stichos {
   get preparingTechnique() {
     return this.preparing ? techniqueById(this.preparing.id) : undefined;
   }
+  get enemyNavigationDiagnostics() {
+    return this.enemyNavigation.diagnostics;
+  }
   get actionCues(): CombatCue[] {
     const own = this.preparing;
     const cues: CombatCue[] = [
@@ -1501,19 +1504,8 @@ export class Stichos {
       if (this.personalPlans.size > 16)
         this.personalPlans.delete(this.personalPlans.keys().next().value!);
     }
-    let record = this.personalStories.records.find((r) => r.bodyId === identity);
-    if (!record) {
-      if (this.personalStories.records.length >= 128) this.personalStories.records.shift();
-      record = {
-        bodyId: identity,
-        baselineCommissions: this.freeLifeState.completed,
-        repaid: false,
-        trusted: null,
-        aligned: false,
-        heard: [],
-      };
-      this.personalStories.records.push(record);
-    }
+    const record = this.personalStories.records.find((r) => r.bodyId === identity);
+    if (!record) return null;
     if (record.trusted && !plan.relationships.some((r) => r.npcId === record.trusted))
       throw new Error('A personal history names an unrelated witness.');
     if (record.heard?.some((id) => !plan!.relationships.some((r) => r.npcId === id)))
@@ -1524,6 +1516,25 @@ export class Stichos {
     )
       throw new Error('The personal record predates its required work.');
     return { plan, record };
+  }
+  private admitPersonalStory(candidate: LifeCandidate) {
+    const identity = `${candidate.id}@${candidate.index}`;
+    if (this.personalStories.records.some((r) => r.bodyId === identity)) return true;
+    // These records are reward receipts, not a cache. Never evict an older life
+    // to admit a new one, since revisiting would reset its paid obligations.
+    if (this.personalStories.records.length >= 128) return false;
+    this.personalStories.records.push({
+      bodyId: identity,
+      baselineCommissions: this.freeLifeState.completed,
+      repaid: false,
+      trusted: null,
+      aligned: false,
+      heard: [],
+    });
+    return true;
+  }
+  get personalHistoryCapacity() {
+    return { retained: this.personalStories.records.length, capacity: 128 };
   }
   get personalStory() {
     const context = this.personalContext();
@@ -1646,6 +1657,7 @@ export class Stichos {
       customization: normalizeLifeCustomization(customization),
     };
     this.originCandidate = candidate;
+    this.admitPersonalStory(candidate);
     this.occupiedNpcId = candidate.id;
     this.occupiedBody = this.lifeBody(candidate);
     this.npcMemory.set(candidate.id, clone(this.occupiedBody));
@@ -1757,6 +1769,12 @@ export class Stichos {
       target = existing ? clone(existing) : this.lifeBody(candidate);
     if (target.hp <= 0 || target.hostile || !this.clear(target))
       return { ok: false, message: 'That resident cannot receive this arrival.' };
+    if (!this.admitPersonalStory(candidate))
+      return {
+        ok: false,
+        message:
+          'This world already remembers 128 personal histories. Revisit a recorded life; its promises and rewards remain protected.',
+      };
     if (!existing) {
       this.npcMemory.set(target.id, clone(target));
       this.bodyPossessions.set(target.id, {
@@ -2541,7 +2559,11 @@ export class Stichos {
       ...new Set([
         ...(this.personalContext()?.plan.relationships.map((r) => r.npcId) ?? []),
         ...this.orders
-          .filter((o) => o.status === 'working' || o.journey?.phase === 'returning')
+          .filter(
+            (o) =>
+              o.status === 'working' ||
+              (o.status === 'cancelled' && o.journey && o.journey.phase !== 'ready'),
+          )
           .map((o) => o.workerId),
       ]),
     ];
@@ -2615,7 +2637,10 @@ export class Stichos {
     if (
       this.orders.some(
         (o) =>
-          o.workerId === workerId && o.status === 'cancelled' && o.journey?.phase === 'returning',
+          o.workerId === workerId &&
+          o.status === 'cancelled' &&
+          o.journey &&
+          o.journey.phase !== 'ready',
       )
     )
       return {
@@ -2682,7 +2707,11 @@ export class Stichos {
     this.player.coins -= preview.wages;
     this.laborSerial++;
     this.orders = this.orders
-      .filter((o) => o.status === 'working' || o.journey?.phase === 'returning')
+      .filter(
+        (o) =>
+          o.status === 'working' ||
+          (o.status === 'cancelled' && o.journey && o.journey.phase !== 'ready'),
+      )
       .slice(-63);
     this.orders.push(preview.order);
     const worker = this.laborWorker(workerId)!;
@@ -3003,24 +3032,28 @@ export class Stichos {
       worker = order && this.laborWorker(order.workerId);
     if (
       this.sharedWorld ||
+      this.spaceId !== 'surface' ||
       this.phase !== 'playing' ||
       !order ||
-      order.status !== 'working' ||
+      !['working', 'cancelled'].includes(order.status) ||
       order.journey?.phase !== 'blocked' ||
       !worker ||
       worker.hp <= 0 ||
       worker.hostile ||
+      this.removed.has(worker.id) ||
       this.occupiedNpcId === worker.id
     )
       return { ok: false, message: 'This worker cannot resume that assignment.' };
-    if (order.allocations.some((a) => this.removed.has(a.propId)))
+    if (order.status === 'working' && order.allocations.some((a) => this.removed.has(a.propId)))
       return {
         ok: false,
         message:
           'An allocated resource has been taken. Withdraw the order; it cannot duplicate that harvest.',
       };
     order.journey.phase =
-      order.journey.allocation >= order.allocations.length ? 'returning' : 'outbound';
+      order.status === 'cancelled' || order.journey.allocation >= order.allocations.length
+        ? 'returning'
+        : 'outbound';
     delete order.journey.reason;
     this.laborPaths.delete(order.id);
     return { ok: true, message: 'The worker is trying the cleared route again.' };
@@ -3066,6 +3099,20 @@ export class Stichos {
     if (!active) this.sharedEnemies.clear();
     this.refreshNpcs();
   }
+  basicActionReadiness(kind: 'attack' | 'ward') {
+    const fail = (reason: string, message: string) => ({ ok: false, reason, message });
+    if (!['attack', 'ward'].includes(kind) || this.phase !== 'playing')
+      return fail('inactive', 'This body cannot attack now.');
+    if (this.dialogue) return fail('dialogue', 'Finish the conversation before acting.');
+    if (this.preparing) return fail('preparing', 'Finish preparing the technique first.');
+    if ((kind === 'attack' ? this.player.attackCooldown : this.player.wardCooldown) > 0)
+      return fail('cooldown', 'Let the action settle first.');
+    if (this.player.stamina < (kind === 'attack' ? 8 : 30))
+      return fail('stamina', 'Recover enough energy before acting.');
+    if (kind === 'attack' && this.combatAppearance.weapon === 'none' && !this.activeArtifact)
+      return fail('equipment', 'Equip a weapon or an invented implement before attacking.');
+    return { ok: true, reason: null, message: 'Ready.' };
+  }
   sharedCombatPreview(kind: 'attack' | 'ward', target?: Point) {
     const p = { ...this.player, appearance: this.combatAppearance },
       bodyId = this.bodyId;
@@ -3076,15 +3123,8 @@ export class Stichos {
     const result = (ok: boolean, message: string) => ({ ok, message, heading, bodyId });
     if (!this.sharedCombat || this.sharedSequence < 0)
       return result(false, 'Wait for the shared combat state.');
-    if (!['attack', 'ward'].includes(kind) || this.phase !== 'playing' || this.dialogue)
-      return result(false, 'This body cannot attack now.');
-    if (
-      (kind === 'attack' ? p.attackCooldown : p.wardCooldown) > 0 ||
-      p.stamina < (kind === 'attack' ? 8 : 30)
-    )
-      return result(false, 'Recover enough energy and let the action settle first.');
-    if (kind === 'attack' && p.appearance.weapon === 'none' && !this.activeArtifact)
-      return result(false, 'Equip a weapon or an invented implement before attacking.');
+    const readiness = this.basicActionReadiness(kind);
+    if (!readiness.ok) return result(false, readiness.message);
     if (kind === 'attack') {
       const weapon = p.appearance.weapon === 'none' ? 'staff' : p.appearance.weapon;
       const range = this.activeArtifact?.properties.range ?? this.weaponProfile(weapon).range;
@@ -3925,7 +3965,7 @@ export class Stichos {
       const possible = freeLifeMilestones(
         this.freeLifeState,
         future,
-        this.quests.filter((q) => q.id.startsWith('supply:') && q.complete).length,
+        this.completedSupplyJobs,
         this.quests.filter(
           (q) =>
             q.id.startsWith('correspondence:') &&
@@ -4249,6 +4289,8 @@ export class Stichos {
           player: p,
           time: this.worldTime,
         });
+      this.syncCampaign();
+      this.syncFreeLife();
     }
     this.updateLivingWorld(dt, length > 0);
     this.fieldRefresh -= dt;
@@ -4513,7 +4555,7 @@ export class Stichos {
           (o) =>
             o.workerId === npc.id &&
             (o.status === 'working' ||
-              (o.status === 'cancelled' && o.journey?.phase === 'returning')),
+              (o.status === 'cancelled' && o.journey && o.journey.phase !== 'ready')),
         )
       )
         continue;
@@ -4843,7 +4885,7 @@ export class Stichos {
     };
   }
   get freeLife() {
-    const supplies = this.quests.filter((q) => q.id.startsWith('supply:') && q.complete).length;
+    const supplies = this.completedSupplyJobs;
     const dispatches = this.quests.filter(
       (q) =>
         q.id.startsWith('correspondence:') &&
@@ -5420,6 +5462,10 @@ export class Stichos {
         'The country remains',
         'The return investigation is complete. Theo may keep travelling, support or oppose the six families, maintain homes and clinics, and inhabit any nearby willing, living person at a quiet shrine. Each body retains its own belongings.',
       );
+      // Entering free life, rather than serializing it later, admits nearby
+      // identities and reconciles purposes earned during the investigation.
+      this.refreshNpcs();
+      this.syncFreeLife();
     } else this.syncCampaign();
   }
 
@@ -5860,6 +5906,8 @@ export class Stichos {
           ? `Deliver ${job.amount} ${this.itemName(job.item)}`
           : 'Ask for a local supply job',
       });
+      if (job?.active)
+        this.dialogue!.choices.push({ id: 'supply:cancel', label: 'Withdraw this supply order' });
     }
     this.event('dialogue');
   }
@@ -6012,6 +6060,7 @@ export class Stichos {
           ? `Deliver ${job.amount} ${ITEMS[job.item].name.toLowerCase()}`
           : 'Ask for local botanical work',
       });
+      if (job?.active) choices.push({ id: 'supply:cancel', label: 'Withdraw this supply order' });
     } else if (npc.role === 'archivist') {
       text =
         'Priests are called originais, true children of Prometheus. Behind their reverence sits the Cúpula do Destino. The Sallas family keeps records even the other families cannot read.';
@@ -6402,6 +6451,11 @@ export class Stichos {
       this.deliverSupply(npc);
       return;
     }
+    if (choiceId === 'supply:cancel' && npc?.role === 'botanist') {
+      const result = this.cancelSupply(npc.id);
+      this.reply(result.message);
+      return;
+    }
     if (choiceId === 'rest' && prop && ['bench', 'shrine'].includes(prop.kind)) {
       this.dialogue = null;
       this.rest();
@@ -6421,7 +6475,68 @@ export class Stichos {
     }
   }
 
+  private get completedSupplyJobs() {
+    return this.quests.filter(
+      (q) => q.id.startsWith('supply:') && q.complete && q.outcome !== 'withdrawn',
+    ).length;
+  }
+  get activeSupplyJobs() {
+    return [...this.supplyJobs.values()]
+      .filter((job) => job.active)
+      .map((job) => {
+        const recipient =
+          this.npcs.find((n) => n.id === job.npcId) ??
+          this.npcMemory.get(job.npcId) ??
+          this.actors.get(job.npcId)?.body ??
+          this.world.npcsAround(job.target.x, job.target.y, 28).find((n) => n.id === job.npcId);
+        const recipientAvailable =
+          !!recipient &&
+          recipient.hp > 0 &&
+          !recipient.hostile &&
+          !this.removed.has(job.npcId) &&
+          job.npcId !== this.occupiedNpcId;
+        const sourceAvailable = this.world
+          .propsAround(job.target.x, job.target.y, 0.25)
+          .some(
+            (p) => p.kind === job.item && distance(p, job.target) < 0.1 && !this.removed.has(p.id),
+          );
+        return {
+          ...clone(job),
+          questId: `supply:${job.npcId}:${job.number}`,
+          recipientName: recipient?.name ?? 'the absent botanist',
+          recipientAvailable,
+          sourceAvailable,
+          reason: !recipientAvailable
+            ? 'The recipient is unavailable. Withdraw this order without losing your supplies.'
+            : !sourceAvailable
+              ? 'The marked plot is depleted. Bring matching plants from elsewhere, or withdraw.'
+              : 'Bring the requested plants, or withdraw without payment.',
+        };
+      });
+  }
+  cancelSupply(npcId: string) {
+    const job = this.supplyJobs.get(npcId);
+    if (this.phase !== 'playing' || !job?.active)
+      return { ok: false, message: 'There is no active supply order to withdraw.' };
+    job.active = false;
+    const quest = this.quests.find((q) => q.id === `supply:${npcId}:${job.number}`);
+    if (quest) {
+      // Old readers count complete supply quests as paid service. Keep this
+      // false so rolling back cannot convert a withdrawal into earned rewards.
+      quest.complete = false;
+      quest.outcome = 'withdrawn';
+      quest.stage++;
+      quest.objective = 'Supply order withdrawn without payment. All carried plants remain yours.';
+      delete quest.target;
+    }
+    return {
+      ok: true,
+      message: 'Supply order withdrawn. No reward was claimed and your plants remain yours.',
+    };
+  }
+
   private acceptSupply(npc: Npc) {
+    if (npc.hp <= 0 || npc.hostile || this.removed.has(npc.id)) return;
     if (this.supplyJobs.get(npc.id)?.active) return;
     const number = (this.supplyJobs.get(npc.id)?.number ?? 0) + 1;
     const preferred = (['cequin', 'heartleaf', 'emberroot'] as const)[
@@ -6471,6 +6586,10 @@ export class Stichos {
   private deliverSupply(npc: Npc) {
     const job = this.supplyJobs.get(npc.id);
     if (!job?.active) return;
+    if (npc.hp <= 0 || npc.hostile || this.removed.has(npc.id)) {
+      this.reply('This botanist can no longer receive the order. Withdraw it from your journal.');
+      return;
+    }
     if (!this.spend({ [job.item]: job.amount })) {
       this.reply(
         `We still need ${job.amount} ${ITEMS[job.item].name.toLowerCase()}. The plants are marked in your journal.`,
@@ -6729,14 +6848,11 @@ export class Stichos {
       return;
     }
     const p = this.player;
-    if (
-      this.phase !== 'playing' ||
-      this.dialogue ||
-      this.preparing ||
-      p.attackCooldown > 0 ||
-      p.stamina < 8
-    )
+    const readiness = this.basicActionReadiness('attack');
+    if (!readiness.ok) {
+      if (readiness.reason === 'equipment') this.event('dialogue', readiness.message);
       return;
+    }
     if (target && finite(target.x) && finite(target.y) && distance(target, p) > 0.01)
       p.heading = Math.atan2(target.y - p.y, target.x - p.x);
     const artifact = this.activeArtifact;
@@ -6815,14 +6931,7 @@ export class Stichos {
       return;
     }
     const p = this.player;
-    if (
-      this.phase !== 'playing' ||
-      this.dialogue ||
-      this.preparing ||
-      p.wardCooldown > 0 ||
-      p.stamina < 30
-    )
-      return;
+    if (!this.basicActionReadiness('ward').ok) return;
     p.stamina -= 30;
     p.wardCooldown = 8;
     this.effect('ward', p, '#9abde9', 0.75);
@@ -7591,28 +7700,41 @@ export class Stichos {
   }
 
   save() {
-    this.syncCampaign();
-    this.syncFreeLife();
-    if (this.campaignState.ending)
-      for (const npc of this.npcs) if (distance(npc, this.player) < 6) this.rememberIdentity(npc);
-    for (const npc of this.npcs) this.rememberNpc(npc);
+    // Observation must not grant rewards, discover people or alter live actor
+    // revisions. Reconcile the two legacy persistence views in detached copies.
+    const actors = this.actors.fork();
+    const npcMemory = new Map(this.npcMemory);
+    for (const npc of this.npcs) {
+      if (actors.has(npc.id)) {
+        actors.update(npc, this.worldTime.elapsedSeconds);
+        if (npc.hp <= 0 || this.removed.has(npc.id)) actors.markDead(npc.id);
+      }
+      if (
+        npcMemory.has(npc.id) ||
+        npc.id.startsWith('body:theo-priest:') ||
+        npc.hp < npc.maxHp ||
+        npc.hostile !== (npc.role === 'raider') ||
+        this.removed.has(npc.id)
+      )
+        npcMemory.set(npc.id, clone(npc));
+    }
     // Legacy consequence records and the persistent identity ledger describe one
     // body. Capture its latest offscreen journey before serializing either view.
-    for (const id of this.npcMemory.keys()) {
-      const record = this.actors.get(id);
-      if (record) this.npcMemory.set(id, clone(record.body));
+    for (const id of npcMemory.keys()) {
+      const record = actors.get(id);
+      if (record) npcMemory.set(id, clone(record.body));
       else {
-        const npc = this.npcMemory.get(id)!;
-        this.actors.register(
+        const npc = npcMemory.get(id)!;
+        actors.register(
           npc,
           npc.hostile ? 'enemy' : npc.role === 'guard' ? 'guard' : 'npc',
           this.worldTime.elapsedSeconds,
           { home: { spaceId: 'surface', ...npc.home }, speed: npc.speed },
         );
-        if (npc.hp <= 0 || this.removed.has(id)) this.actors.markDead(id);
+        if (npc.hp <= 0 || this.removed.has(id)) actors.markDead(id);
       }
     }
-    return clone({
+    const state = clone({
       version: 1,
       terrainRevision: 3,
       doorRevision: 1,
@@ -7676,14 +7798,13 @@ export class Stichos {
       removed: [...this.removed],
       opened: [...this.opened],
       weapons: [...this.weapons],
-      npcs: [...this.npcMemory.values()],
+      npcs: [...npcMemory.values()],
       quests: this.quests,
       journal: this.journal,
       time: this.time,
       worldElapsed: this.calendarSeconds,
       society: this.society.save(),
       wildlifeNotes: [...this.wildlifeNotes],
-      actorLedger: this.actors.snapshot(),
       livingSystems: this.localSystems?.save() ?? this.pendingSystemsSave,
       fieldSerial: this.fieldSerial,
       fieldReceipts: this.fieldReceipts.snapshot(),
@@ -7703,6 +7824,8 @@ export class Stichos {
       supplyJobs: [...this.supplyJobs.values()],
       correspondenceJobs: [...this.correspondenceJobs.values()],
     });
+    // The ledger snapshot is already detached; avoid cloning every actor twice.
+    return { ...state, actorLedger: actors.snapshot() };
   }
 
   static restore(value: unknown): Stichos {
@@ -7902,6 +8025,9 @@ export class Stichos {
     }
     game.freeLifeState = restoreFreeLife(data.freeLife);
     game.personalStories = restorePersonalStories(data.personalStories);
+    // Legacy saves without a story ledger are admitted once during restoration,
+    // never by a diagnostic getter. A full ledger retains every old receipt.
+    if (game.originCandidate) game.admitPersonalStory(game.originCandidate);
     if (data.freeLife === undefined)
       game.freeLifeState.knownHosts = [...game.npcMemory.values()]
         .filter((n) => n.hp > 0 && !n.hostile && !game.removed.has(n.id))
@@ -8335,6 +8461,7 @@ function validateSave(value: unknown): SaveData {
         text(q.objective, 1000) &&
         number(q.stage, 0, 100, true) &&
         typeof q.complete === 'boolean' &&
+        (q.outcome === undefined || (q.outcome === 'withdrawn' && !q.complete)) &&
         (q.target === undefined || point(q.target)),
     ) ||
     new Set(value.quests.map((q) => q.id)).size !== value.quests.length

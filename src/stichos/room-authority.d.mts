@@ -1,4 +1,5 @@
 export const MAX_MESSAGE_BYTES: number;
+import type { RoomDurability } from './room-durability.ts';
 import type {
   RoomWorldCheckpoint,
   SignedRoomCheckpoint,
@@ -45,4 +46,7 @@ export class CoopRooms {
   publishCheckpoint(checkpoint: SignedRoomCheckpoint): void;
   signingIdentity(id: string): Promise<RoomSigningIdentity>;
   setSigningIdentity(id: string, identity: RoomSigningIdentity): void;
+  getDurability(id: string): RoomDurability;
+  setDurability(id: string, status: RoomDurability): void;
+  beginClosing(): void;
 }

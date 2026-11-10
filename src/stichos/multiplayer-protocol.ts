@@ -116,6 +116,7 @@ export type MultiplayerClientMessage =
   | { type: 'emote'; gesture: MultiplayerGesture };
 
 export type MultiplayerServerMessage =
+  | { type: 'durability'; status: import('./room-durability.ts').RoomDurability }
   | ({ type: 'voice_ticket'; requestId: string } & VoiceTicket)
   | { type: 'systems_events'; events: SystemSoundEvent[] }
   | { type: 'systems_frame'; frame: LivingSystemsFrame }
@@ -134,6 +135,7 @@ export type MultiplayerServerMessage =
   | { type: 'checkpoint'; checkpoint: SignedRoomCheckpoint }
   | {
       type: 'welcome';
+      durability?: import('./room-durability.ts').RoomDurability;
       voice?: VoiceCapability;
       living?: FaunaFrame;
       actionExpansion?: 1;

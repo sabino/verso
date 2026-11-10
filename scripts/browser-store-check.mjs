@@ -2,61 +2,111 @@
  * document: no real checkout, payment, entitlement server or gameplay state is modified. */
 import fs from 'node:fs';
 import path from 'node:path';
+import { measureStableClickTarget } from './browser-harness.mjs';
 const endpoint = process.argv[2];
 const origin = process.argv[3] ?? 'http://127.0.0.1:4173';
 for (const value of [endpoint, origin])
   if (!value || !['localhost', '127.0.0.1'].includes(new URL(value).hostname))
     throw Error('Use verified workspace CDP and local app URLs.');
-async function connect(url) {
+async function connect(url, events = () => {}) {
   const ws = new WebSocket(url);
   await new Promise((resolve, reject) => {
-    ws.onopen = resolve;
-    ws.onerror = reject;
+    const timer = setTimeout(() => {
+      ws.close();
+      reject(Error('Store fixture CDP connection timed out'));
+    }, 10000);
+    ws.onopen = () => {
+      clearTimeout(timer);
+      resolve();
+    };
+    ws.onerror = () => {
+      clearTimeout(timer);
+      reject(Error('Store fixture CDP connection failed'));
+    };
+    ws.onclose = () => {
+      clearTimeout(timer);
+      reject(Error('Store fixture CDP connection closed'));
+    };
   });
   let id = 0;
   const pending = new Map();
   ws.onmessage = (event) => {
-    const value = JSON.parse(event.data),
-      p = pending.get(value.id);
+    const value = JSON.parse(event.data);
+    if (!value.id) {
+      events(value);
+      return;
+    }
+    const p = pending.get(value.id);
     if (!p) return;
+    clearTimeout(p.timer);
     pending.delete(value.id);
-    value.error ? p.reject(value.error) : p.resolve(value.result);
+    value.error ? p.reject(Error(JSON.stringify(value.error))) : p.resolve(value.result);
   };
+  const closed = () => {
+    for (const p of pending.values()) {
+      clearTimeout(p.timer);
+      p.reject(Error('Store fixture CDP connection closed'));
+    }
+    pending.clear();
+  };
+  ws.onclose = closed;
+  ws.onerror = closed;
   return {
     ws,
     send: (method, params = {}) =>
       new Promise((resolve, reject) => {
         const next = ++id;
-        pending.set(next, { resolve, reject });
-        ws.send(JSON.stringify({ id: next, method, params }));
+        const timer = setTimeout(() => {
+          pending.delete(next);
+          reject(Error(`Store fixture CDP timeout: ${method}`));
+        }, 20000);
+        pending.set(next, { resolve, reject, timer });
+        try {
+          if (ws.readyState !== WebSocket.OPEN) throw Error('Store fixture CDP is not open');
+          ws.send(JSON.stringify({ id: next, method, params }));
+        } catch (error) {
+          clearTimeout(timer);
+          pending.delete(next);
+          reject(error);
+        }
       }),
   };
 }
-const version = await (await fetch(`${endpoint}/json/version`)).json();
+const version = await (
+  await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(10000) })
+).json();
+const fixtureUrl = new URL('/scripts/browser-store-fixture.html', origin).href;
+const fixtureResponse = await fetch(fixtureUrl, { signal: AbortSignal.timeout(10000) });
+if (!fixtureResponse.ok || !(await fixtureResponse.text()).includes('name="verso-store-fixture"'))
+  throw Error('The isolated store fixture document is unavailable; refusing the app fallback.');
 const browser = await connect(version.webSocketDebuggerUrl);
-const out = path.resolve('.dream-loop/stichos-progression');
+const out = path.resolve(process.env.VERSO_STORE_EVIDENCE ?? '.dream-loop/stichos-progression');
 fs.mkdirSync(out, { recursive: true });
 let context, page;
 const checks = [];
+const errors = [];
 try {
   context = (await browser.send('Target.createBrowserContext')).browserContextId;
   const { targetId } = await browser.send('Target.createTarget', {
-    url: new URL('/src/stichos/store.ts', origin).href,
+    url: 'about:blank',
     browserContextId: context,
   });
-  const target = (await (await fetch(`${endpoint}/json/list`)).json()).find(
-    (t) => t.id === targetId,
-  );
-  page = await connect(target.webSocketDebuggerUrl);
+  const target = (
+    await (await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(10000) })).json()
+  ).find((t) => t.id === targetId);
+  page = await connect(target.webSocketDebuggerUrl, ({ method, params }) => {
+    if (method === 'Runtime.exceptionThrown') errors.push(params.exceptionDetails);
+    if (method === 'Runtime.consoleAPICalled' && params.type === 'error') errors.push(params.args);
+  });
   await page.send('Runtime.enable');
   await page.send('Page.enable');
+  await page.send('Emulation.setFocusEmulationEnabled', { enabled: true });
   await page.send('Emulation.setDeviceMetricsOverride', {
     width: 1120,
     height: 800,
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await new Promise((resolve) => setTimeout(resolve, 600));
   const evaluate = async (expression) => {
     const r = await page.send('Runtime.evaluate', {
       expression,
@@ -67,6 +117,25 @@ try {
       throw Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
     return r.result.value;
   };
+  const wait = async (expression, label, timeout = 10000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const ready = await evaluate(expression).catch((error) => {
+        // Navigation can retire the initial about:blank execution context.
+        if (/Execution context was destroyed|Cannot find context/.test(error.message)) return false;
+        throw error;
+      });
+      if (ready) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw Error(`Store fixture timeout: ${label}`);
+  };
+  await page.send('Page.navigate', { url: fixtureUrl });
+  await wait(
+    `location.href===${JSON.stringify(fixtureUrl)} && document.readyState==='complete' && !!document.querySelector('meta[name="verso-store-fixture"]')`,
+    'isolated document ready',
+  );
+  await page.send('Page.bringToFront');
   const check = async (label, expression) => {
     const value = await evaluate(expression);
     if (!value) throw Error(label);
@@ -80,7 +149,8 @@ try {
       await import('/src/stichos/style.css');
       document.body.replaceChildren();
       document.title = 'Stichos isolated store fixture';
-      document.body.style.cssText = 'overflow:auto;height:auto;background:#12242d;padding:24px';
+      document.documentElement.style.cssText = 'overflow:visible;height:auto';
+      document.body.style.cssText = 'overflow:visible;height:auto;background:#12242d;padding:24px';
       const container = document.createElement('main');
       container.style.cssText = 'max-width:1040px;margin:auto';
       document.body.append(container);
@@ -94,6 +164,7 @@ try {
         game: null,
         csrf: 'fixture-csrf-0123456789',
         recoveryConfigured: false,
+        hold: null,
       };
       const game = {
         player: { appearance: appearance(703) },
@@ -111,13 +182,20 @@ try {
       };
       state.game = game;
       window.fetch = async (url, init = {}) => {
-        state.calls.push({
+        const call = {
           url: String(url),
           method: init.method ?? 'GET',
           credentials: init.credentials,
           csrf: init.headers?.['X-Verso-CSRF'],
           body: init.body,
-        });
+        };
+        state.calls.push(call);
+        if (state.hold && String(url).endsWith('/' + state.hold.path)) {
+          const held = state.hold;
+          state.hold = null;
+          held.started();
+          await held.promise;
+        }
         if (state.fail) throw Error('Fixture offline');
         let data;
         if (String(url).endsWith('/catalog'))
@@ -132,13 +210,15 @@ try {
               available: state.enabled,
             })),
           };
-        else if (String(url).endsWith('/wallet'))
+        else if (String(url).endsWith('/wallet')) {
           data = {
             csrf: state.csrf,
             entitlements: state.ids,
             recoveryConfigured: state.recoveryConfigured,
           };
-        else if (String(url).endsWith('/recovery')) {
+          state.walletReadDone?.(data);
+          state.walletReadDone = null;
+        } else if (String(url).endsWith('/recovery')) {
           state.recoveryConfigured = true;
           data = {
             csrf: state.csrf,
@@ -156,12 +236,28 @@ try {
             data = { owned: true };
           } else data = { url: 'https://checkout.stripe.com.evil.invalid/c/pay' };
         } else throw Error('Unexpected fixture HTTP request');
+        call.response = data;
         return new Response(JSON.stringify(data), {
           status: 200,
           headers: { 'Content-Type': 'application/json' },
         });
       };
       state.mount = () => mountStore(container, game, () => state.changes++);
+      state.waitForWallet = () =>
+        new Promise((resolve) => {
+          state.walletReadDone = resolve;
+        });
+      state.holdNext = (path) => {
+        let release, started;
+        const promise = new Promise((resolve) => {
+          release = resolve;
+        });
+        state.heldStarted = new Promise((resolve) => {
+          started = resolve;
+        });
+        state.hold = { path, promise, started };
+        state.release = release;
+      };
       state.restore = () => restoreStoreEntitlements(game, () => state.changes++);
       state.text = () => container.innerText;
       window.storeFixture = state;
@@ -186,10 +282,21 @@ try {
     'Configured test catalog renders real server amount and test label',
     `storeFixture.text().includes('$10.99') && storeFixture.text().includes('Test mode') && !document.querySelector('[data-store-action="buy:aurora-mantle"]').disabled && !document.querySelector('.s-store img')`,
   );
-  const click = async (selector) => {
-    const p = await evaluate(
-      `(() => { const node = document.querySelector(${JSON.stringify(selector)});node.scrollIntoView({block:'center'}); const b = node.getBoundingClientRect(); return {x:b.x+b.width/2,y:b.y+b.height/2}; })()`,
-    );
+  const click = async (selector, waitForIdle = true) => {
+    let p;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      await page.send('Page.bringToFront');
+      p = await evaluate(`(${measureStableClickTarget.toString()})(${JSON.stringify(selector)})`);
+      if (!p.scroll) break;
+      await page.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        ...p.scroll,
+        deltaX: 0,
+        deltaY: p.delta || 120,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    if (p?.scroll || !p) throw Error(`Store fixture target is unreachable: ${selector}`);
     await page.send('Input.dispatchMouseEvent', {
       type: 'mousePressed',
       ...p,
@@ -202,7 +309,11 @@ try {
       button: 'left',
       clickCount: 1,
     });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (waitForIdle)
+      await wait(
+        `document.querySelector('[data-store-action="refresh"]')?.disabled===false`,
+        `wallet action settled after ${selector}`,
+      );
   };
   await click('[data-store-action="buy:aurora-mantle"]');
   await check(
@@ -231,7 +342,7 @@ try {
   await click('[data-store-action="download-code"]');
   await check(
     'Private recovery download contains the code and its ownership warning',
-    `(async()=>downloadFixture.filename === 'stichos-wallet-recovery.txt' && (await downloadFixture.blob.text()).includes(document.querySelector('[data-store-action="recovery-code"]').value) && (await downloadFixture.blob.text()).includes('Anyone with it'))()`,
+    `(async()=>downloadFixture.filename === 'verso-wallet-recovery.txt' && (await downloadFixture.blob.text()).includes(document.querySelector('[data-store-action="recovery-code"]').value) && (await downloadFixture.blob.text()).includes('Anyone with it'))()`,
   );
   await evaluate(
     `URL.createObjectURL=fixtureCreateURL; HTMLAnchorElement.prototype.click=fixtureAnchorClick; delete window.downloadFixture;`,
@@ -265,6 +376,9 @@ try {
     deviceScaleFactor: 1,
     mobile: false,
   });
+  await evaluate(
+    'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
+  );
   await check(
     'Mobile store has no horizontal overflow',
     `document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.s-store-card')].every(c=>c.getBoundingClientRect().right <= innerWidth)`,
@@ -289,6 +403,30 @@ try {
   await check(
     'Offline startup clears unverified premium entitlement without a UI toast',
     `storeFixture.game.verified.length === 0 && !document.querySelector('.s-store-status.is-error')`,
+  );
+  await evaluate(
+    `(async()=>{storeFixture.fail=false;storeFixture.ids=[];await storeFixture.mount();storeFixture.holdNext('catalog');const oldWallet=storeFixture.waitForWallet();storeFixture.oldMount=storeFixture.mount();await storeFixture.heldStarted;if((await oldWallet).entitlements.length!==0)throw Error('The old wallet response must complete before replacement');storeFixture.ids=['sallas-silver'];await storeFixture.mount();storeFixture.release();await storeFixture.oldMount;})()`,
+  );
+  await check(
+    'A replaced catalog request cannot overwrite the current mounted wallet',
+    `storeFixture.game.verified.join()==='sallas-silver'&&!!document.querySelector('[data-store-action="equip:sallas-silver"]')&&!document.querySelector('[data-store-action="refresh"]').disabled`,
+  );
+  await evaluate(
+    `(()=>{storeFixture.holdNext('recover');const input=document.querySelector('[data-store-action="restore-code"]');input.value='VR1-'+'b'.repeat(64);input.dispatchEvent(new Event('input',{bubbles:true}));storeFixture.beforeWalletReads=storeFixture.calls.filter(c=>c.url.endsWith('/wallet')).length;})()`,
+  );
+  await click('[data-store-action="restore-wallet"]', false);
+  await evaluate(`storeFixture.heldStarted`);
+  // Returning the mount promise would make CDP await the recovery release
+  // scheduled below, deadlocking the very queue ordering this scenario tests.
+  await evaluate(`void (storeFixture.newMount=storeFixture.mount());`);
+  await check(
+    'A replacement mount waits for an in-flight cookie recovery before reading the wallet',
+    `storeFixture.calls.filter(c=>c.url.endsWith('/wallet')).length===storeFixture.beforeWalletReads`,
+  );
+  await evaluate(`(async()=>{storeFixture.release();await storeFixture.newMount;})()`);
+  await check(
+    'Recovery completion reconciles into the new mount without a stale busy state or leaked code',
+    `storeFixture.game.verified.join()==='sallas-silver'&&!document.querySelector('[data-store-action="refresh"]').disabled&&!document.querySelector('[data-store-action="recovery-code"]')`,
   );
   const image = await evaluate(
     `(${async function furnitureSheet() {
@@ -351,6 +489,7 @@ try {
     }.toString()})()`,
   );
   fs.writeFileSync(path.join(out, 'home-furniture.png'), Buffer.from(image, 'base64'));
+  if (errors.length) throw Error(`Unexpected store runtime errors: ${JSON.stringify(errors)}`);
   fs.writeFileSync(
     path.join(out, 'store-results.json'),
     JSON.stringify(
@@ -368,6 +507,9 @@ try {
   console.log(JSON.stringify({ passed: checks.length, checks, output: out }, null, 2));
 } finally {
   page?.ws.close();
-  if (context) await browser.send('Target.disposeBrowserContext', { browserContextId: context });
-  browser.ws.close();
+  try {
+    if (context) await browser.send('Target.disposeBrowserContext', { browserContextId: context });
+  } finally {
+    browser.ws.close();
+  }
 }

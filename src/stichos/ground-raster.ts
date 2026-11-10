@@ -1,6 +1,9 @@
 import { StichosArt } from './art.ts';
 import { regionalGroundColor } from './biome-art.ts';
 import type { Tile } from './types.ts';
+export const GROUND_WORKER_TIMEOUT_MS = 5000;
+const WORKER_RETRY_MS = 10000;
+const MAX_WORKER_FAILURES = 3;
 
 interface GroundJob {
   id: number;
@@ -25,6 +28,10 @@ export class GroundRaster {
   private admitted = false;
   private art = new StichosArt();
   private workerAllowed = true;
+  private workerStarted = 0;
+  private workerFailures = 0;
+  private retryAt = 0;
+  private timedOut = 0;
   private completed = 0;
   private workerMs: number[] = [];
   private mainMs: number[] = [];
@@ -34,6 +41,9 @@ export class GroundRaster {
       queued: this.jobs.length,
       cached: this.cache.size,
       completed: this.completed,
+      state: this.active ? 'waiting' : this.workerAllowed ? 'available' : 'fallback',
+      workerFailures: this.workerFailures,
+      timeouts: this.timedOut,
       workerMs: [...this.workerMs],
       mainMs: [...this.mainMs],
     };
@@ -46,6 +56,10 @@ export class GroundRaster {
     this.cache.clear();
     this.art = new StichosArt();
     this.admitted = false;
+    this.workerAllowed = true;
+    this.workerStarted = 0;
+    this.workerFailures = 0;
+    this.retryAt = 0;
   }
   beginFrame() {
     this.admitted = false;
@@ -92,6 +106,8 @@ export class GroundRaster {
     this.worker?.terminate();
     this.worker = null;
     this.workerAllowed = false;
+    this.workerFailures++;
+    this.retryAt = performance.now() + WORKER_RETRY_MS;
     if (this.active) this.active.waiting = false;
     this.active = null;
   }
@@ -112,11 +128,13 @@ export class GroundRaster {
         this.worker = new Worker(new URL('./ground-worker.ts', import.meta.url), {
           type: 'module',
         });
-        this.worker.onerror = () => this.failWorker();
-        this.worker.onmessageerror = () => this.failWorker();
-        this.worker.onmessage = ({ data }) => {
+        const worker = this.worker;
+        worker.onerror = worker.onmessageerror = () => {
+          if (this.worker === worker) this.failWorker();
+        };
+        worker.onmessage = ({ data }) => {
           const current = this.active;
-          if (!current || current.id !== data.id) {
+          if (this.worker !== worker || !current || current.id !== data.id) {
             data.bitmap?.close();
             return;
           }
@@ -135,6 +153,7 @@ export class GroundRaster {
       }
       this.active = job;
       job.waiting = true;
+      this.workerStarted = performance.now();
       this.worker.postMessage({ id: job.id, cx: job.cx, cy: job.cy, tiles: job.tiles });
     } catch {
       this.failWorker();
@@ -145,6 +164,12 @@ export class GroundRaster {
     budgetMs = 2.5,
   ) {
     const started = performance.now();
+    if (this.active && started - this.workerStarted >= GROUND_WORKER_TIMEOUT_MS) {
+      this.timedOut++;
+      this.failWorker();
+    }
+    if (!this.workerAllowed && this.workerFailures < MAX_WORKER_FAILURES && started >= this.retryAt)
+      this.workerAllowed = true;
     this.dispatch();
     let steps = 0;
     for (const job of this.jobs) {

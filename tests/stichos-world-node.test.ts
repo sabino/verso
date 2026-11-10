@@ -236,3 +236,72 @@ test('public creation requires the exact planet code; unknown private rooms stay
   assert.equal(full.code, 'server_full');
   assert.equal(server.hub.rooms.size, 1, 'capacity never silently evicts a durable world');
 });
+
+test('shutdown rejects late writes while final replication drains, retaining the committed checkpoint', async (t) => {
+  const directory = await mkdtemp(join(tmpdir(), 'verso-world-closing-'));
+  let publishStarted!: () => void;
+  const publishing = new Promise<void>((resolve) => {
+    publishStarted = resolve;
+  });
+  let finishPublish!: () => void;
+  const heldPublish = new Promise<void>((resolve) => {
+    finishPublish = resolve;
+  });
+  let restored: ReturnType<typeof createCoopServer> | undefined;
+  const server = createCoopServer({
+    persistenceDirectory: directory,
+    onCheckpoint: async () => {
+      publishStarted();
+      await heldPublish;
+    },
+  });
+  const address: any = await server.listen(0, '127.0.0.1');
+  t.after(async () => {
+    finishPublish();
+    await server.close();
+    await restored?.close();
+    await rm(directory, { recursive: true, force: true });
+  });
+  const socket = await openSocket(address.port);
+  const welcome = await request(socket, joinIdentity());
+  const waitFor = (predicate: (message: any) => boolean) =>
+    new Promise<any>((resolve) => {
+      const listener = (raw: any) => {
+        const message = JSON.parse(raw.toString());
+        if (predicate(message)) {
+          socket.off('message', listener);
+          resolve(message);
+        }
+      };
+      socket.on('message', listener);
+    });
+  const before = {
+    type: 'chat',
+    requestId: 'r1',
+    channel: 'world',
+    text: 'Committed before closing',
+  };
+  const first = waitFor((message) => message.type === 'chat_result' && message.requestId === 'r1');
+  socket.send(JSON.stringify(before));
+  assert.equal((await first).ok, true);
+  const closing = server.close();
+  await publishing;
+  const late = waitFor((message) => message.type === 'chat_result' && message.requestId === 'r2');
+  socket.send(JSON.stringify({ ...before, requestId: 'r2', text: 'Too late' }));
+  assert.equal((await late).ok, false);
+  const replay = waitFor((message) => message.type === 'chat_result' && message.requestId === 'r1');
+  socket.send(JSON.stringify(before));
+  assert.equal(
+    (await replay).ok,
+    true,
+    'An exact committed receipt remains available while closing.',
+  );
+  finishPublish();
+  await closing;
+  restored = createCoopServer({ persistenceDirectory: directory });
+  await restored.listen(0, '127.0.0.1');
+  assert.deepEqual(
+    restored.hub.exportRoom(welcome.room)!.state.chat.map((message: any) => message.text),
+    ['Committed before closing'],
+  );
+});

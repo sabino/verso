@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { measureStableClickTarget } from './browser-harness.mjs';
 import { routeBeyondDistance } from './browser-route.mjs';
@@ -30,7 +31,58 @@ const pass = (name, detail = '') => {
   results.push({ name, detail });
   console.log(`PASS ${name}: ${detail}`);
 };
-let browser, failure;
+let browser, failure, companionFixture;
+async function startCompanionFixture() {
+  const requests = [],
+    pending = [];
+  const server = createServer((request, response) => {
+    if (request.headers.origin !== new URL(url).origin || request.url !== '/api/ai/pair') {
+      response.writeHead(403).end();
+      return;
+    }
+    response.setHeader('Access-Control-Allow-Origin', new URL(url).origin);
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    response.setHeader('Access-Control-Allow-Private-Network', 'true');
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204).end();
+      return;
+    }
+    if (request.method !== 'POST') {
+      response.writeHead(405).end();
+      return;
+    }
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 1024) request.destroy();
+    });
+    request.on('end', () => {
+      requests.push({ method: request.method, path: request.url, body });
+      pending.push(response);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(4176, '127.0.0.1', resolve);
+  });
+  return {
+    requests,
+    release() {
+      for (const response of pending.splice(0))
+        if (!response.destroyed)
+          response
+            .writeHead(200, { 'Content-Type': 'application/json' })
+            .end(JSON.stringify({ token: 'a'.repeat(43) }));
+    },
+    async close() {
+      await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections();
+      });
+    },
+  };
+}
 async function connect(address, events = () => {}) {
   const ws = new WebSocket(address);
   await new Promise((resolve, reject) => {
@@ -117,6 +169,7 @@ async function traveler(name) {
       code,
       windowsVirtualKeyCode: vk,
       modifiers,
+      ...(key === 'Enter' ? { text: '\r', unmodifiedText: '\r' } : {}),
     });
     if (hold) await delay(hold);
     await page.send('Input.dispatchKeyEvent', {
@@ -323,6 +376,84 @@ try {
       blockedReason: typing.interaction.capabilities.move.reason,
     }),
   );
+  // A refused delivery keeps the real draft; switching to local speech can retry it.
+  const draft = 'A draft survives a refused room message.';
+  // Observe the native event path without changing form or game behavior.
+  await c.read(`(()=>{
+    const events=[];
+    for(const type of ['keydown','keypress','click','submit']) document.querySelector('#v-chat-form').addEventListener(type,event=>{
+      if(events.length<24) events.push({type,key:event.key??null,charCode:event.charCode??null,target:event.target.id,trusted:event.isTrusted});
+    },true);
+    window.__versoChatInputTrace=events;
+    return true;
+  })()`);
+  await c.click('[data-chat-channel="world"]');
+  await c.fill('#v-chat-input', draft);
+  assert.equal(
+    await c.read(
+      "document.querySelector('[data-chat-channel=world]').getAttribute('aria-pressed')",
+    ),
+    'true',
+  );
+  await c.key('Enter', 'Enter', 13);
+  await c.wait(
+    "window.stichos.state.requests.chat?.status==='failed'",
+    'room-only speech fails while solo',
+  );
+  assert.equal(await c.read("document.querySelector('#v-chat-input').value"), draft);
+  assert.match(
+    await c.read("document.querySelector('#v-chat-log').textContent"),
+    /Join or host a room/,
+  );
+  assert.equal(await c.read('document.activeElement.id'), 'v-chat-input');
+  await c.click('[data-chat-channel="say"]');
+  await c.click('#v-chat-input');
+  await c.key('Enter', 'Enter', 13);
+  await c.wait(
+    "document.querySelector('#v-chat-input').value===''",
+    'accepted local speech clears its submitted draft',
+  );
+  assert.ok((await c.read("document.querySelector('#v-chat-log').textContent")).includes(draft));
+  pass('A failed chat send preserves the draft and focus; accepted retry clears it');
+
+  // A test-only loopback service answers preflight, then holds the actual pair response.
+  // It invokes no real companion or authentication; application actions remain native.
+  companionFixture = await startCompanionFixture();
+  await c.click('#s-sound');
+  await c.click('.v-app-diagnostics > summary');
+  await c.click('#v-ai');
+  await c.click('[data-screen="ai"] details > summary');
+  await c.fill('#v-ai-code', 'abcdefghijklmnopqrstuvwxyz123456');
+  await c.click('#v-ai-pair button');
+  const companionDeadline = Date.now() + 10000;
+  while (!companionFixture.requests.length && Date.now() < companionDeadline) await delay(50);
+  assert.deepEqual(
+    companionFixture.requests,
+    [
+      {
+        method: 'POST',
+        path: '/api/ai/pair',
+        body: JSON.stringify({ code: 'abcdefghijklmnopqrstuvwxyz123456' }),
+      },
+    ],
+    'Companion check reached the real loopback fixture with its native form value',
+  );
+  await c.wait(
+    "window.stichos.state.requests.panel?.status==='pending'&&document.querySelector('#v-ai-pair button').disabled&&document.querySelector('#v-ai-status').textContent==='Checking the local companion…'",
+    'the held companion request has a visible pending state',
+  );
+  await c.click('#v-ai-close');
+  companionFixture.release();
+  await c.wait(
+    "window.stichos.state.modal===''&&window.stichos.state.requests.panel?.status==='cancelled'",
+    'closing companion setup settles its presentation owner',
+  );
+  await delay(150);
+  assert.equal((await c.state()).modal, '');
+  await companionFixture.close();
+  companionFixture = null;
+  pass('Closing an in-flight companion check cancels its owner without reopening detached UI');
+
   const keyWalk = async (point) => {
     for (let n = 0; n < 30; n++) {
       const p = (await c.state()).player,
@@ -575,7 +706,33 @@ try {
   assert.deepEqual(restored.productionStructures[0], collected.productionStructures[0]);
   pass('Reload and Continue preserve the structure, depleted inputs, coins and collected output');
   await c.shot('07-restored-garden');
-  fs.writeFileSync(path.join(out, 'final-state.json'), JSON.stringify(restored, null, 2));
+  const merchant = (await c.state()).npcs.find((npc) => npc.role === 'merchant' && npc.hp > 0);
+  assert.ok(merchant, 'A living merchant is reachable in the starter settlement');
+  await approach(merchant);
+  const liveMerchant = (await c.state()).npcs.find((npc) => npc.id === merchant.id);
+  assert.ok(liveMerchant);
+  await c.worldClick(liveMerchant);
+  await c.wait(
+    '!!document.querySelector(\'[data-trade-select="buy:cequin"]\')',
+    'native interaction opens merchant stock',
+  );
+  await c.click('[data-trade-select="buy:cequin"]');
+  await c.selectIndex('#v-trade-quantity', 1);
+  const beforePurchase = await c.state();
+  await c.click('#v-trade-confirm');
+  await c.wait(
+    `window.stichos.state.inventory.cequin===${(beforePurchase.inventory.cequin ?? 0) + 5}`,
+    'one native click buys exactly the selected five portions',
+  );
+  assert.equal(await c.read("document.querySelector('#v-trade-quantity').value"), '5');
+  assert.equal(await c.read('document.activeElement.id'), 'v-trade-confirm');
+  assert.equal((await c.state()).player.coins, beforePurchase.player.coins - 20);
+  await c.shot('08-trade-preserves-quantity-focus');
+  await c.click('#s-dialogue-close');
+  pass(
+    'Merchant redraw preserves quantity and confirmation focus after an exact five-item purchase',
+  );
+  fs.writeFileSync(path.join(out, 'final-state.json'), JSON.stringify(await c.state(), null, 2));
   assert.deepEqual(errors, []);
   pass('No browser exceptions or error logs');
 } catch (error) {
@@ -584,11 +741,16 @@ try {
   for (const c of clients) {
     await c.shot(`FAIL-${c.name.split(' ')[0]}`).catch(() => {});
     fs.writeFileSync(
+      path.join(out, `FAIL-${c.name.split(' ')[0]}-input.json`),
+      JSON.stringify(await c.read('window.__versoChatInputTrace??[]').catch(() => []), null, 2),
+    );
+    fs.writeFileSync(
       path.join(out, `FAIL-${c.name.split(' ')[0]}.json`),
       JSON.stringify(await c.state().catch(() => null), null, 2),
     );
   }
 } finally {
+  await companionFixture?.close();
   fs.writeFileSync(
     path.join(out, 'results.json'),
     JSON.stringify(

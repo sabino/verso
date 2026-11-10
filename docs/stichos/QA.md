@@ -1,12 +1,24 @@
-# Release verification · 2026-09-11
+# Release verification · 2026-11-10
 
-## Current generation-four release evidence
+## Lifecycle closure integration checkpoint
+
+The lifecycle closure addresses all 13 recorded findings and the additional gaps in the preserved 97-group [state inventory](../STATE-MACHINES.md). Scope, implementation decisions, compatibility and focused evidence are recorded in [Lifecycle closure](../LIFECYCLE-CLOSURE.md).
+
+**PASS — final tested runtime `9bb32536149abd6abf80aa9d875333a95b1de4fe`.** [Actions run 42779971686](https://github.com/sabino/verso/actions/runs/42779971686) completed **972 tests: 971 passed, 0 failed, 1 existing skip**; **all 6 native Pear tests**, formatting and the production build passed. Every browser stage passed: portrait controls, first-life flow, earlier playable routes, platform recovery, production and store. Complete results and screenshots are in [browser evidence artifact 13745592576](https://github.com/sabino/verso/actions/runs/42779971686/artifacts/13745592576).
+
+Production passed **15 checks with no browser errors**, including rejected chat followed by accepted retry, cancellation against an actual loopback companion, **80 real seconds** of garden production followed by one collection and reload, and an exact **five-item** purchase preserving merchant quantity and focus. The store passed **19 checks** using mocked HTTP; no real payment or Checkout was exercised. Platform recovery covered activated precache, a blocked app import recovered through native Retry, and galaxy touch cancel/pan/zoom/Close.
+
+The final runtime includes the guarded native Enter handoff: the original input, form and default submitter must retain their interaction epoch. The harness sends a complete CDP Enter payload, and companion fetch calls preserve a valid receiver. Malformed-save Retry performs actual validation/restoration; reading bytes alone cannot clear a restore error. These corrections retain stale-input and stale-owner protection.
+
+Verified production assets include `app-9Ik4rxyw.js`, `app-Bchxcw2T.css` and `index-kPBPBy5l.js`. The world-node rollout is **pending**: the last live health check still reported `262377f875b550430ed75f4cf0713d6dd5ad2ab2`, with healthy storage and voice. The [deployment workflow](../WORLD-NODE-CI.md#one-time-operator-setup) requires a fresh private data/signing-identity backup, current image/configuration capture and its non-secret dispatch reference; no current backup reference is recorded here. Frontend Pages publishes separately after merge. Earlier local Chromium/Pear permission failures are historical limits superseded by the hosted pass. The older published results below retain their own checkpoint scope.
+
+## Archived generation-four release evidence · 2026-09-11
 
 Verso’s primary start is a generated resident in a generated civilization. Geography, climate, practical technology, personal history, relationships and body-owned equipment reconstruct from their recorded seeds and generator version. Stíchos is one optional civilization; Theo’s authored story remains the explicit generation-three legacy entry. The current behavior is described in [generated worlds and lives](GENERATED-LIVES.md), [ordinary equipment](ORDINARY-EQUIPMENT.md) and [the life/universe contract](UNIVERSE.md).
 
 The full suite passed **384/384 tests in 79.92 seconds**, with no failures, skips or cancellations, at source `2a083ee`. Formatting and production build passed. The final housing correction at `fcb0c64` then passed **24 focused tests**, covering actual local residential homes, personal story completion/reload, paid worker jobs, ecology, planned parcels and legacy compatibility; TypeScript and formatting passed again. Evidence: `.dream-loop/generation4-release-tests.log`. Public asset identity and final browser verification are recorded in [PAGES.md](PAGES.md).
 
-### Current public deployment
+### Public deployment at that checkpoint
 
 Pages commit `404b771` and successful run `34633591760` serve `app-C_d-KSbm.js` / `app-Cees6plc.css`, service worker `0c5a8a2e0e01ac7429f2`. All 31 non-HTML assets match local SHA-256. The actual public three-browser route passed with three distinct generation-four lives, URL joining, QR display, mobile code-only joining and correct electronic avatar context, with no runtime exceptions or error logs. These are three browser contexts on one machine, not three separately operated Internet connections. The public path also passed all four generated-life persistence/offline checks, including exact saved identity, location, appearance and inventory, correct nested PWA scope, decoded install icons and actual walking with page and service-worker networking disabled. No browser errors occurred. [Deployment details](PAGES.md).
 
@@ -41,7 +53,7 @@ All four completed repair runs reported **zero browser errors**. An initial sour
 
 Fresh independent reviews of the generated-world art improved from 4.4 to 5.3, 5.6, 6.1 and **6.5/10** for the woodland sample (6.4 for the dry settlement). The **8/10 visual target is not reached**. Structural roof faces, full cross gables, planted compounds and actual orchard trees improved the scenes; repeated undergrowth, rigid town layout and spatial lighting remain the main visual gaps. The latest graded town captures measured approximately **53–54 foreground FPS**, compared with approximately 60 before the additional planting and grade. These are bounded samples in the workspace browser, not a hardware benchmark. Evidence: `.dream-loop/woodland-village/world.png`, `.dream-loop/woodland-round3/world.png`, and the preserved prior captures in `.dream-loop/woodland-before-courtyards/`.
 
-### Current boundaries
+### Boundaries at that checkpoint
 
 Normal life storage is automatic and browser-local. The main UI has no routine Download save or Restore a save controls. The file-import/export results below belong to their named historical builds. Host departure ends the shared session; personal inventory, story and bodily needs remain local. Household worker orders currently operate in solo worlds. Signed checkpoints and optional native public replication retain the existing host authority model.
 

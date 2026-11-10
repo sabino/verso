@@ -749,3 +749,25 @@ a {
     scroll-behavior: auto !important;
   }
 }
+
+.p-controls button:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+.p-save-state {
+  position: fixed;
+  right: 14px;
+  bottom: 8px;
+  max-width: min(400px, 90vw);
+  color: #9dbbb7;
+  font-size: 10px;
+  text-align: right;
+  pointer-events: none;
+}
+.p-save-state.is-error,
+.p-save-feedback.is-error {
+  color: #ffd59d;
+}
+.p-terminal .p-save-feedback {
+  font-size: 12px;
+}

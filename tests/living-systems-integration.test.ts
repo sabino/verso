@@ -14,6 +14,7 @@ import { CivicWorld, validCivicSave } from '../src/stichos/civic-world.ts';
 import { generateUnderworld } from '../src/stichos/underworld.ts';
 import { FIELD_RULES } from '../src/stichos/field-loot.ts';
 import type { Npc, Prop, Settlement, Tile } from '../src/stichos/types.ts';
+import { renderLivingSystemsPanel } from '../src/stichos/living-systems-ui.ts';
 
 const town: Settlement = {
   id: 'town:fixture',
@@ -139,6 +140,127 @@ function fixture(mode: 'solo' | 'shared' = 'solo', saved?: LivingSystemsSave) {
   return { systems, peer, world, cmd, wounds, npcs, props };
 }
 const wire = <T>(v: T) => JSON.parse(JSON.stringify(v));
+
+test('worker recovery flows from an authority frame through the panel and authenticated command, preserving legacy saves', () => {
+  const f = fixture();
+  Object.assign(f.peer, { x: 6, y: 3 });
+  f.systems.setPeers([f.peer], 2);
+  f.systems.tick(2);
+  assert.equal(
+    f.cmd({
+      kind: 'property',
+      command: { kind: 'hire', propertyId: 'house:fixture', npcId: 'joiner' },
+    }).ok,
+    true,
+  );
+  const worker = f.systems.actors.get('joiner')!;
+  for (let n = 0; n < 3; n++) f.systems.property.react(f.peer.id, 'injured-worker', worker);
+  const frame = f.systems.frame(f.peer);
+  assert.equal(frame.property.workers[0].recovery!.reconcile.ok, true);
+  const panel = renderLivingSystemsPanel(frame, {
+    section: 'estates',
+    detail: 'house:fixture',
+    view: 'work',
+    page: 0,
+    message: '',
+    busy: false,
+  });
+  const recovery = [...panel.actions.values()].find(
+    (a) =>
+      a.kind === 'command' &&
+      a.command.kind === 'property' &&
+      a.command.command.kind === 'reconcile-worker',
+  );
+  assert.ok(recovery?.kind === 'command');
+  assert.equal(validSystemsCommand(recovery.command), true);
+  assert.equal(
+    validSystemsCommand({
+      kind: 'property',
+      command: { kind: 'retry-worker', propertyId: 'house:fixture', npcId: 'joiner' },
+    }),
+    true,
+  );
+  assert.equal(
+    validSystemsCommand({
+      kind: 'property',
+      command: { kind: 'retry-worker', propertyId: 'house:fixture', npcId: 4 },
+    }),
+    false,
+  );
+  assert.equal(
+    validSystemsCommand({
+      kind: 'property',
+      command: {
+        kind: 'reconcile-worker',
+        propertyId: 'house:fixture',
+        npcId: 'joiner',
+        loyalty: 100,
+      },
+    }),
+    false,
+  );
+  const coins = f.systems.economy.satchel(f.peer.id)!.coins;
+  const event = `test:${f.systems.nextSequence(f.peer.id)}`;
+  assert.equal(f.systems.command(f.peer, recovery.command, event).ok, true);
+  assert.equal(f.systems.command(f.peer, recovery.command, event).ok, false);
+  assert.equal(f.systems.economy.satchel(f.peer.id)!.coins, coins - 4);
+  assert.equal(f.systems.property.save().workers[0].loyalty, 25);
+  const saved = f.systems.save();
+  assert.equal(validLivingSystemsSave(wire(saved)), true);
+  assert.equal('recovery' in saved.property.workers[0], false, 'presentation adds no save fields');
+  assert.equal('pauseReason' in saved.property.workers[0], false);
+  assert.deepEqual(f.systems.save(), saved, 'repeated saves remain observational');
+  const legacyFrame = wire(f.systems.frame(f.peer));
+  delete legacyFrame.property.workers[0].recovery;
+  delete legacyFrame.property.workers[0].pauseReason;
+  delete legacyFrame.property.workers[0].journeyState;
+  assert.equal(
+    validLivingSystemsFrame(legacyFrame),
+    true,
+    'older authority frames remain readable',
+  );
+});
+
+test('the living authority deliberately restarts a failed worker journey, including an externally reached goal', () => {
+  const f = fixture();
+  Object.assign(f.peer, { x: 6, y: 3 });
+  f.systems.setPeers([f.peer], 2);
+  f.systems.tick(2);
+  assert.equal(
+    f.cmd({
+      kind: 'property',
+      command: { kind: 'hire', propertyId: 'house:fixture', npcId: 'joiner' },
+    }).ok,
+    true,
+  );
+  const target = { spaceId: 'surface', x: 8, y: 6 };
+  const command: SystemsCommand = {
+    kind: 'property',
+    command: { kind: 'retry-worker', propertyId: 'house:fixture', npcId: 'joiner' },
+  };
+  f.systems.actors.setDestination('joiner', target);
+  let time = 3;
+  const sealed = { cell: () => ({ kind: 'blocked' as const }) };
+  for (; time < 300 && f.systems.actors.get('joiner')!.state !== 'unreachable'; time++)
+    f.systems.actors.advance(time, () => sealed);
+  assert.equal(f.systems.actors.get('joiner')!.state, 'unreachable');
+  assert.equal(f.systems.frame(f.peer).property.workers[0].recovery!.retry.ok, true);
+  const event = `test:${f.systems.nextSequence(f.peer.id)}`;
+  assert.equal(f.systems.command(f.peer, command, event).ok, true);
+  assert.equal(f.systems.actors.get('joiner')!.state, 'planning');
+  assert.equal(f.systems.command(f.peer, command, event).ok, false);
+  for (; time < 600 && f.systems.actors.get('joiner')!.state !== 'unreachable'; time++)
+    f.systems.actors.advance(time, () => sealed);
+  assert.equal(f.systems.actors.get('joiner')!.state, 'unreachable');
+  f.systems.actors.transition('joiner', target, ++time);
+  assert.equal(f.cmd(command).ok, true);
+  assert.equal(
+    f.systems.actors.get('joiner')!.state,
+    'planning',
+    'a near-goal retry clears the failed canonical state',
+  );
+  assert.equal(f.cmd(command).ok, false, 'the active retry cannot consume more receipts');
+});
 
 test('canonical civic events strip session metadata and all snapshots remain strict', () => {
   const { systems, peer } = fixture();

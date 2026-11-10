@@ -1,4 +1,4 @@
-import { planetAt, sectorPlanets, type Planet, type KnownWorld } from './universe';
+import { planetAt, sectorPlanets, type Planet, type KnownWorld } from './universe.ts';
 /** Pan/zoom exploration with native buttons for keyboard and touch access. */
 export function mountGalaxy(
   canvas: HTMLCanvasElement,
@@ -13,9 +13,11 @@ export function mountGalaxy(
     cx = 0,
     cy = 0;
   let selectedSeed = current;
+  let disposed = false;
   let hoveredSeed: number | null = null;
   let planets: Planet[] = [],
-    drag: { x: number; y: number; cx: number; cy: number; moved: boolean } | null = null;
+    drag: { id: number; x: number; y: number; cx: number; cy: number; moved: boolean } | null =
+      null;
   function catalogue() {
     const list = sectorPlanets(sector),
       seen = new Set(list.map((p) => p.seed));
@@ -28,6 +30,7 @@ export function mountGalaxy(
     planets = list;
   }
   function draw() {
+    if (disposed) return;
     const bounds = canvas.getBoundingClientRect();
     canvas.width = Math.max(280, Math.round(bounds.width));
     canvas.height = Math.max(200, Math.round(bounds.height));
@@ -112,10 +115,13 @@ export function mountGalaxy(
   cy = start.y;
   draw();
   canvas.onpointerdown = (e) => {
+    if (disposed || e.button !== 0 || drag) return;
+    e.preventDefault();
     canvas.setPointerCapture(e.pointerId);
-    drag = { x: e.clientX, y: e.clientY, cx, cy, moved: false };
+    drag = { id: e.pointerId, x: e.clientX, y: e.clientY, cx, cy, moved: false };
   };
   canvas.onpointermove = (e) => {
+    if (disposed || (drag && drag.id !== e.pointerId)) return;
     if (!drag) {
       const b = canvas.getBoundingClientRect(),
         x = (e.clientX - b.left - canvas.width / 2) / scale + cx,
@@ -135,9 +141,10 @@ export function mountGalaxy(
     draw();
   };
   canvas.onpointerup = (e) => {
-    if (!drag) return;
+    if (!drag || drag.id !== e.pointerId) return;
     const moved = drag.moved;
     drag = null;
+    if (canvas.hasPointerCapture(e.pointerId)) canvas.releasePointerCapture(e.pointerId);
     if (moved) return;
     const b = canvas.getBoundingClientRect(),
       x = (e.clientX - b.left - canvas.width / 2) / scale + cx,
@@ -151,8 +158,28 @@ export function mountGalaxy(
       draw();
     }
   };
+  const cancelDrag = () => {
+    const previous = drag;
+    drag = null;
+    hoveredSeed = null;
+    if (previous && canvas.hasPointerCapture(previous.id))
+      canvas.releasePointerCapture(previous.id);
+  };
+  canvas.onpointercancel = canvas.onlostpointercapture = (event) => {
+    if (drag?.id !== event.pointerId) return;
+    cancelDrag();
+    draw();
+  };
+  canvas.onpointerleave = () => {
+    if (!drag) {
+      hoveredSeed = null;
+      draw();
+    }
+  };
   canvas.onwheel = (e) => {
     e.preventDefault();
+    if (disposed || !Number.isFinite(e.deltaY)) return;
+    cancelDrag();
     scale = Math.max(0.18, Math.min(1.8, scale * Math.exp(-e.deltaY * 0.001)));
     draw();
   };
@@ -160,10 +187,14 @@ export function mountGalaxy(
   observer.observe(canvas);
   return {
     zoom(factor: number) {
+      if (disposed || !Number.isFinite(factor) || factor <= 0) return;
+      cancelDrag();
       scale = Math.max(0.18, Math.min(1.8, scale * factor));
       draw();
     },
     sector(delta: number) {
+      if (disposed || !Number.isSafeInteger(delta)) return;
+      cancelDrag();
       sector += delta;
       catalogue();
       cx = cy = 0;
@@ -175,6 +206,8 @@ export function mountGalaxy(
       draw();
     },
     focus(seed: number) {
+      if (disposed || !Number.isFinite(seed)) return;
+      cancelDrag();
       const p = planetAt(seed);
       selectedSeed = p.seed;
       cx = p.x;
@@ -183,8 +216,11 @@ export function mountGalaxy(
       onSelect(p);
     },
     dispose() {
+      disposed = true;
+      cancelDrag();
       observer.disconnect();
       canvas.onpointerdown = canvas.onpointermove = canvas.onpointerup = canvas.onwheel = null;
+      canvas.onpointercancel = canvas.onlostpointercapture = canvas.onpointerleave = null;
     },
   };
 }

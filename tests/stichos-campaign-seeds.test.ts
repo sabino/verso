@@ -576,7 +576,10 @@ test('new local orders fit finite botanical yields while a larger legacy order f
     if (radius >= 48) wideSearches++;
     return originalPropsAround(x, y, radius);
   };
-  game.save();
+  // Observation does not retarget a commission. The bounded world refresh owns
+  // that transition after a depletion, even without a save request.
+  game.choose('close');
+  for (let tick = 0; tick < 7; tick++) game.update(0.1, { x: 0, y: 0, run: false });
   assert.deepEqual(game.freeLife.contract?.target, { x: board.x, y: board.y });
   assert.equal(game.freeLife.contract?.progress, 4);
   assert.match(

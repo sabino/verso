@@ -10,6 +10,23 @@ concurrency:
   group: pages-${{ github.ref }}
   cancel-in-progress: false
 jobs:
+  native-replica:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@a0853c24544627f65ddf259abe73b1d18a591444 # v5
+        with:
+          node-version: '24.15.0'
+          cache: npm
+          cache-dependency-path: pear-node/package-lock.json
+      - run: npm ci
+        working-directory: pear-node
+      - name: Verify native replica lifecycle
+        run: npm test
+        working-directory: pear-node
   validate:
     runs-on: ubuntu-24.04
     timeout-minutes: 20
@@ -51,7 +68,7 @@ jobs:
           if-no-files-found: warn
   build:
     if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
-    needs: validate
+    needs: [validate, native-replica]
     runs-on: ubuntu-24.04
     timeout-minutes: 15
     permissions:

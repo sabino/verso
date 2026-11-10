@@ -154,6 +154,7 @@ export class CoopRooms {
     this.now = now;
     this.durable = durable;
     this.checkpoints = new Map();
+    this.durability = new Map();
     this.signingIdentities = new Map();
     this.codeFactory = codeFactory;
     this.maxRooms = maxRooms;
@@ -165,6 +166,7 @@ export class CoopRooms {
     this.rooms = new Map();
     this.connections = new Set();
     this.voiceAuthority = null;
+    this.closing = false;
   }
   signingIdentity(id) {
     let identity = this.signingIdentities.get(id);
@@ -176,6 +178,50 @@ export class CoopRooms {
   }
   setSigningIdentity(id, identity) {
     this.signingIdentities.set(id, Promise.resolve(identity));
+  }
+  getDurability(id) {
+    return {
+      ...(this.durability.get(id) ?? {
+        phase: this.durable ? 'pending' : 'untracked',
+        lastSavedRevision: null,
+        lastSavedAt: null,
+        error: null,
+      }),
+    };
+  }
+  setDurability(id, status) {
+    this.durability.set(id, { ...status });
+    const room = this.rooms.get(id);
+    if (room) this.broadcast(room, { type: 'durability', status: this.getDurability(id) });
+  }
+  storageBlocked(room) {
+    return this.closing || this.durability.get(room.id)?.phase === 'degraded';
+  }
+  beginClosing() {
+    this.closing = true;
+  }
+  rejectStorageWrite(connection, message) {
+    if (!this.storageBlocked(connection.room)) return false;
+    const type =
+      message.type === 'systems'
+        ? 'systems_result'
+        : message.type === 'combat'
+          ? 'combat_result'
+          : message.type === 'chat'
+            ? 'chat_result'
+            : 'claimResult';
+    this.send(connection, {
+      type,
+      requestId: message.requestId,
+      ok: false,
+      reason: this.closing
+        ? 'This world is closing. Reconnect after it restarts.'
+        : this.getDurability(connection.room.id).error,
+      ...(type === 'combat_result'
+        ? { frame: this.combatFrame(connection.room, connection.member) }
+        : {}),
+    });
+    return true;
   }
   attach(socket) {
     const connection = {
@@ -283,6 +329,7 @@ export class CoopRooms {
       ) {
         this.rooms.delete(id);
         this.checkpoints.delete(id);
+        this.durability.delete(id);
         this.signingIdentities.delete(id);
       }
     }
@@ -457,6 +504,7 @@ export class CoopRooms {
       this.send(connection, { ...old.result, frame: room.systems.frame(this.systemsPeer(member)) });
       return;
     }
+    if (this.rejectStorageWrite(connection, message)) return;
     if (this.now() - (member.lastSystemsAction ?? -Infinity) < 150)
       return this.send(connection, {
         type: 'systems_result',
@@ -640,6 +688,7 @@ export class CoopRooms {
     if (!finite(dt, 0, 0.25) || dt === 0) return;
     const active = [];
     for (const room of this.rooms.values()) {
+      if (this.storageBlocked(room)) continue;
       const members = [...room.members.values()].filter((m) => m.connection);
       if (!members.length) continue;
       room.combat.setWorldTime(roomWorldSeconds(room.calendarEpochMs, this.now()));
@@ -796,6 +845,9 @@ export class CoopRooms {
     const room = connection.room,
       member = connection.member;
     if (member.connection !== connection) return;
+    // Freeze gameplay writes. Delivery acknowledgements may still drain: they are idempotent,
+    // and dropping them would strand clients whose acknowledgement high-water already advanced.
+    if (this.storageBlocked(room) && message.type === 'pose') return;
     if (message.type === 'voice_ticket') {
       if (this.voiceAuthority) this.voiceAuthority.issue(connection, message.requestId);
       else this.error(connection, 'voice_unavailable', 'This host does not support voice.');
@@ -921,6 +973,18 @@ export class CoopRooms {
   join(connection, message) {
     if (connection.member)
       return this.error(connection, 'already_joined', 'This connection already belongs to a room.');
+    if (this.closing)
+      return this.error(
+        connection,
+        'server_closing',
+        'This world is closing. Reconnect after it restarts.',
+      );
+    if ([...this.durability.values()].some((status) => status.phase === 'degraded'))
+      return this.error(
+        connection,
+        'storage_failed',
+        'World saving is unavailable. New arrivals are paused until storage recovers.',
+      );
     if (
       message.protocol !== MULTIPLAYER_PROTOCOL ||
       !integer(message.seed, 0, 0xffffffff) ||
@@ -1174,6 +1238,7 @@ export class CoopRooms {
       member.lastPose = this.now();
       this.send(connection, {
         type: 'welcome',
+        durability: this.getDurability(room.id),
         protocol: MULTIPLAYER_PROTOCOL,
         room: room.id,
         peerId: member.id,
@@ -1433,6 +1498,7 @@ export class CoopRooms {
         });
       return this.send(connection, old.result);
     }
+    if (this.rejectStorageWrite(connection, message)) return;
     if (
       !['say', 'world'].includes(message.channel) ||
       !text(message.text, 1, 560) ||
@@ -1503,6 +1569,7 @@ export class CoopRooms {
         });
       return this.send(connection, old.result);
     }
+    if (this.rejectStorageWrite(connection, message)) return;
     if (message.type === 'machine') {
       const machine = { ...message.machine, ownerId: member.id };
       if (!validProductionMachine(machine)) return answer(false, 'Invalid production platform.');
@@ -1630,6 +1697,7 @@ export class CoopRooms {
       this.send(connection, { ...old.result, frame: this.combatFrame(room, member) });
       return;
     }
+    if (this.rejectStorageWrite(connection, message)) return;
     const serial = /^r([1-9]\d{0,14})$/.exec(message.requestId);
     if (serial && Number(serial[1]) <= member.combatSerial)
       return deny('That combat action was already processed.');
@@ -1718,6 +1786,7 @@ export class CoopRooms {
       this.send(connection, old.result);
       return;
     }
+    if (this.rejectStorageWrite(connection, message)) return;
     const result = (ok, reason) => {
       const answer = {
         type: 'claimResult',

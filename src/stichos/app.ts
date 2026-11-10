@@ -23,6 +23,8 @@ import { createWorldExperience } from './experience.ts';
 import { mountVoiceUi } from './voice-ui.ts';
 import { mountInteractionSequences } from './interaction-sequence.ts';
 import { interactionState, strikeDestination } from './interaction-state.ts';
+import { AsyncOwner } from './async-owner.ts';
+import { NarrativeTransfer, type TransferKind } from './narrative-transfer.ts';
 import { FrameProfiler } from './frame-profiler.ts';
 import aiCompanionGuide from '../../docs/stichos/AI-COMPANION.md?url';
 import { drawProduction } from './production-art';
@@ -49,7 +51,7 @@ import {
 import type { Geography, RoomInvitation, Planet } from './universe';
 import { requestInstall, appMode } from '../install';
 import qrcode from 'qrcode-generator';
-import { claimLifeTab, releaseLifeTab } from './life-lease';
+import { claimLifeTab, releaseLifeTab, lifeTabStatus } from './life-lease';
 import { mountLife } from './life';
 import { MultiplayerConnection, getBrowserPlayerId, savedWorlds } from './multiplayer';
 import { PRODUCTION_KINDS, type ProductionKind } from './production';
@@ -72,7 +74,7 @@ import { AtlasController, AtlasPainter, atlasDistance } from './atlas';
 import type { AtlasView, AtlasSource } from './atlas';
 import { parseSeed, formatSeed } from '../seed';
 import { AudioDirector } from '../audio';
-import { registerOffline } from '../offline';
+import { registerOffline, getOfflineStatus, subscribeOfflineStatus } from '../offline';
 import type { ItemId, Npc, Point, Prop } from './types';
 
 void registerOffline();
@@ -161,8 +163,12 @@ let touchAiming = false;
 let game = new Stichos(0x53544943);
 const multiplayer = new MultiplayerConnection();
 const peerEmotes = new Map<string, { text: string; until: number }>();
-let sharedActionPending = false;
-let combatPending = false;
+const foreground = new AsyncOwner<'world' | 'combat'>();
+const panelRequest = new AsyncOwner<'lookup' | 'companion'>();
+const connectionRequest = new AsyncOwner<'join' | 'reconnect' | 'resume'>();
+const productionRequest = new AsyncOwner<'sync'>();
+const chatRequest = new AsyncOwner<'send'>();
+const leaseRequest = new AsyncOwner<'claim'>();
 let multiplayerRoster = '';
 let roomName = 'Traveler';
 let roomServer = worldNodeEndpoint();
@@ -173,9 +179,35 @@ try {
     localStorage.getItem('verso.room.connection.v2') === 'chosen',
   );
 } catch {}
+type ModalKind =
+  | 'actions'
+  | 'ai'
+  | 'announcements'
+  | 'creation'
+  | 'ending'
+  | 'expeditions'
+  | 'galaxy'
+  | 'gear'
+  | 'help'
+  | 'journal'
+  | 'life'
+  | 'life-in-use'
+  | 'living-systems'
+  | 'lost'
+  | 'map'
+  | 'pause'
+  | 'production'
+  | 'retire'
+  | 'shortcuts'
+  | 'sound'
+  | 'techniques'
+  | 'title'
+  | 'together'
+  | 'voice'
+  | 'words';
+let modal: ModalKind | '' = '';
 let started = false,
   paused = true,
-  modal = '',
   packView: 'pack' | 'craft' = 'pack';
 let selectedItem: ItemId | null = null;
 let trackedQuestId: string | null = null;
@@ -230,11 +262,14 @@ function trackedQuest() {
       stage: 0,
     };
   // A finished explicit quest must not permanently hide the resident's next step.
-  if (trackedQuestId && !game.quests.some((q) => q.id === trackedQuestId && !q.complete))
+  if (
+    trackedQuestId &&
+    !game.quests.some((q) => q.id === trackedQuestId && !q.complete && q.outcome !== 'withdrawn')
+  )
     trackedQuestId = null;
   if (game.universeLife && !trackedQuestId && game.personalStory)
     return personalThread(game.personalStory, game.inventory, game.freeLife.contract);
-  const active = game.quests.filter((q) => !q.complete);
+  const active = game.quests.filter((q) => !q.complete && q.outcome !== 'withdrawn');
   return (
     active.find((q) => q.id === trackedQuestId) ??
     (game.universeLife ? active.find((q) => q.target) : active.filter((q) => q.target).at(-1)) ??
@@ -263,13 +298,8 @@ let toastUntil = 0,
   equipmentSignature = '',
   dialogueSignature = '',
   lastPhase = game.phase;
-let transferStarted = 0,
-  transferKind: 'opening' | 'arrival' | 'return' | 'clinic' = 'opening',
-  transferStep = -1;
-let pendingTransfer: (() => void) | null = null;
-let ignoreNextTransfer = false;
-let introPage = 0,
-  replayingIntro = false;
+const narrative = new NarrativeTransfer<Stichos>();
+let ignoreNextTransfer: Stichos | null = null;
 const notebookView: NotebookView = {
   section: 'years',
   entry: 0,
@@ -307,6 +337,10 @@ let travelTarget: string | undefined;
 let travelObstructed = false;
 const releaseDirectionPointers = new Set<() => void>();
 function releaseWorldInput(reason: 'dialogue' | 'menu' | 'interaction') {
+  pointer = null;
+  hover = null;
+  touchAiming = false;
+  el('s-hover').hidden = true;
   travel.cancel(reason);
   travelTarget = undefined;
   heldAttack = false;
@@ -387,6 +421,7 @@ const portraitControls = mountPortraitControls(root, {
 });
 let placingEstate: { propertyId: string; station: StationKind; point?: Point } | null = null;
 let placingProduction: ProductionKind | null = null;
+let placementRevision = 0;
 const estatePlacementControls = document.createElement('section');
 estatePlacementControls.className = 'v-estate-placement';
 estatePlacementControls.hidden = true;
@@ -399,6 +434,7 @@ function cancelBlueprint() {
   estatePlacementControls.hidden = true;
 }
 function cancelPlacement() {
+  placementRevision++;
   cancelBlueprint();
   placingProduction = null;
 }
@@ -438,7 +474,7 @@ estatePlacementControls.querySelector<HTMLButtonElement>('[data-estate-confirm]'
     canvas.focus();
   };
 async function fieldAction(command: SystemsCommand): Promise<SystemsResult> {
-  if (sharedActionPending) return { ok: false, message: 'Finish the current action first.' };
+  if (foreground.pending) return { ok: false, message: 'Finish the current action first.' };
   const availability = game.fieldEffectAvailability(
     command,
     multiplayer.status === 'offline'
@@ -449,8 +485,8 @@ async function fieldAction(command: SystemsCommand): Promise<SystemsResult> {
     toast(availability.message);
     return availability;
   }
-  sharedActionPending = true;
-  try {
+  const operation = foreground.start('world');
+  const outcome = await operation.run(async () => {
     let result: SystemsResult;
     if (multiplayer.status === 'offline') result = game.fieldCommand(command);
     else {
@@ -467,6 +503,7 @@ async function fieldAction(command: SystemsCommand): Promise<SystemsResult> {
       );
       result = await multiplayer.systems(command);
       if (
+        !operation.current ||
         game !== receivingGame ||
         origin.scope !== `room:${multiplayer.room}:${multiplayer.peerId}`
       )
@@ -479,15 +516,28 @@ async function fieldAction(command: SystemsCommand): Promise<SystemsResult> {
             'This recovery receipt was not accepted for the current life. Reconnect to reconcile it.',
         };
     }
-    if (result.ok && result.transition) inputSequences.transition();
+    if (result.ok && result.transition) {
+      resetWorldSelection();
+      cancelPlacement();
+      inputSequences.transition();
+    }
     if (result.ok) {
       save();
       updateUI();
     } else toast(result.message);
+    if (!result.ok) operation.settle('failed');
     return result;
-  } finally {
-    sharedActionPending = false;
-  }
+  });
+  if (outcome.status === 'failed' && operation.current) toast(errorMessage(outcome.error));
+  return outcome.status === 'succeeded'
+    ? outcome.value
+    : {
+        ok: false,
+        message:
+          outcome.status === 'failed'
+            ? errorMessage(outcome.error)
+            : 'That action was cancelled when its life or room changed.',
+      };
 }
 const livingUi = createLivingSystemsUi({
   openModal: (html, mount) => {
@@ -518,7 +568,7 @@ function currentInteraction() {
     phase: game.phase,
     paused,
     modal,
-    transfer: !!transferStarted,
+    transfer: !!narrative.active,
     dialogue: !!game.dialogue,
     satchel: root.classList.contains('satchel-open'),
     hidden: document.hidden,
@@ -528,7 +578,7 @@ function currentInteraction() {
       : document.activeElement?.closest('select')
         ? 'select'
         : 'world',
-    pending: sharedActionPending ? (combatPending ? 'combat' : 'world') : 'idle',
+    pending: foreground.pending ? (foreground.kind === 'combat' ? 'combat' : 'world') : 'idle',
     placement: placingEstate ? 'estate' : placingProduction ? 'production' : 'none',
   });
 }
@@ -630,6 +680,10 @@ function toast(message: string, duration = 4500) {
 let ownsLifeTab = false;
 function save() {
   if (!started || !ownsLifeTab) return false;
+  if (!lifeTabStatus().canSave) {
+    toast(lifeTabStatus().message ?? 'This tab no longer owns the continuing life.');
+    return false;
+  }
   const profileStart = frameProfiler.active ? performance.now() : 0;
   try {
     stored = JSON.stringify(game.save());
@@ -651,7 +705,31 @@ function save() {
     if (frameProfiler.active) frameProfiler.record('save', performance.now() - profileStart);
   }
 }
+function resetWorldSelection() {
+  pointer = null;
+  hover = null;
+  touchAiming = false;
+  selectedItem = null;
+  tradeTab = 'buy';
+  tradeSelection = '';
+  tradeQuantity = 1;
+  tradeNpc = null;
+  walkStuck = 0;
+  walkLast = { ...game.player };
+  travelObstructed = false;
+  el('s-hover').hidden = true;
+}
 function activate(next: Stichos) {
+  narrative.cancel();
+  el('s-transfer').hidden = true;
+  ignoreNextTransfer = null;
+  pendingRoomAfterArrival = null;
+  foreground.cancel();
+  panelRequest.cancel();
+  connectionRequest.cancel();
+  productionRequest.cancel();
+  chatRequest.cancel();
+  resetWorldSelection();
   inputSequences.transition();
   cancelPlacement();
   voiceUi.release();
@@ -696,7 +774,8 @@ function setInert(value: boolean) {
     .forEach((n) => (n.inert = value));
 }
 let modalInvoker: HTMLElement | null = null;
-function openModal(kind: string, html: string, completeWindow = false) {
+function openModal(kind: ModalKind, html: string, completeWindow = false) {
+  panelRequest.cancel();
   cancelPlacement();
   inputSequences.transition();
   heldAttack = false;
@@ -795,6 +874,7 @@ function openModal(kind: string, html: string, completeWindow = false) {
   container.scrollTop = 0;
 }
 function closeModal() {
+  panelRequest.cancel();
   inputSequences.transition();
   disposeSpecial?.();
   disposeSpecial = null;
@@ -817,7 +897,11 @@ function title() {
     'title',
     `<div class="v-window-heading"><div class="s-title-mark">VERSO</div><button id="v-install-title">Install app</button></div><h2>One universe.<br>A life of your own.</h2><p>Gather supplies, build a working homestead, and take on the wilderness. Begin with a resident’s unfinished promise; grow from hand tools to production and field expeditions.</p><ol class="v-title-loop" aria-label="Your path"><li>1 · Meet your people</li><li>2 · Gather & build</li><li>3 · Explore & fight</li></ol>${invite ? `<div class="v-incoming"><b>Invitation to room ${esc(invite.room)}</b><span>${esc(planetAt(invite.seed).name)} · your friend’s planet is already selected</span><button id="v-join-invite" class="s-primary">Join this world</button></div>` : ''}${stored ? '<button id="s-continue" class="s-primary s-continue">Continue this life</button>' : ''}<div class="v-entry-columns"><form id="s-start"><label>Planet seed <span>Leave blank for a new signal</span><input id="s-seed-input" value="" maxlength="64" aria-label="World seed" placeholder="A name, number, or leave to chance"></label><button class="s-primary" type="submit">Choose a life</button><button id="v-theo-story" type="button">Theo Bishop’s story · Stíchos</button></form><form id="v-title-room"><label>Join friends<input id="v-title-code" maxlength="600" placeholder="Complete room code or invitation link" autocapitalize="characters" autocomplete="off"></label><button type="submit">Find room</button><p id="v-title-room-error" class="v-room-error" role="alert" hidden></p><button id="v-title-galaxy" type="button">Browse the galaxy</button></form></div><p class="s-title-foot">Your continuing life is kept in this browser. Share a room link to bring friends to the same world.</p>`,
   );
-  el('v-install-title').onclick = () => void requestInstall().then(toast);
+  if (lifeTabStatus().message)
+    el('s-modal')
+      .querySelector('.s-window')!
+      .insertAdjacentHTML('beforeend', `<p role="status">${esc(lifeTabStatus().message!)}</p>`);
+  el('v-install-title').onclick = () => void installFromPanel();
   el('v-install-title').insertAdjacentHTML(
     'beforebegin',
     `<button id="v-title-announcements" class="v-announcements-entry">${announcements.buttonLabel()}</button>`,
@@ -918,28 +1002,32 @@ function choosePlanet(
     },
   );
 }
-let joiningPublic = false;
 let roomError = '';
 let roomDraft = '';
-let findingRoom = false;
+function ownsCurrentPanel() {
+  const source = game,
+    revision = modalRevision;
+  return () => source === game && revision === modalRevision;
+}
 async function joinInvitation(invite: RoomInvitation) {
-  if (joiningPublic) return;
-  const source = game;
+  if (connectionRequest.pending) return;
+  const operation = connectionRequest.start('join');
+  const source = game,
+    ownsPanel = ownsCurrentPanel();
   roomError = '';
   roomDraft = hasCompleteRoomAddress(invite.endpoint)
     ? roomAddress(invite)
     : roomLink(location.href, invite);
   roomServer = invite.endpoint;
   roomName = game.player.name;
-  try {
+  const result = await operation.run(async () => {
     if (invite.public && invite.endpoint !== 'peer:') {
-      joiningPublic = true;
       toast('Opening this planet’s shared world…', 12000);
       await multiplayer.joinPublicWorld(invite.endpoint, invite.room, roomIdentity());
     } else if (invite.public) {
-      joiningPublic = true;
       toast('Listening for this planet’s public frequency…', 16000);
       const { discoverRoom } = await import('./multiplayer');
+      if (!operation.current || source !== game) return;
       let found = false;
       try {
         const info = await discoverRoom('peer:', invite.room);
@@ -949,35 +1037,47 @@ async function joinInvitation(invite: RoomInvitation) {
       } catch (error) {
         if (error instanceof Error && error.message.includes('different planet')) throw error;
       }
-      if (source !== game) return;
+      if (!operation.current || source !== game) return;
       if (found) await multiplayer.connect('peer:', roomIdentity(), invite.room);
       else
         try {
           await multiplayer.hostPublicWorld(invite.room, roomIdentity());
         } catch (error) {
-          // Simultaneous first visitors may race for the same rendezvous address.
+          if (!operation.current || source !== game) return;
           if (error instanceof Error && /taken|unavailable|already.*use/i.test(error.message))
             await multiplayer.connect('peer:', roomIdentity(), invite.room);
           else throw error;
         }
-    } else await multiplayer.connect(roomServer, roomIdentity(), invite.room);
-    if (source !== game) return;
+    } else await multiplayer.connect(invite.endpoint, roomIdentity(), invite.room);
+  });
+  if (!operation.current || source !== game) return;
+  if (result.status === 'succeeded') {
     pendingInvitation = null;
     history.replaceState(null, '', roomLink(location.href, invite));
-    toast(
-      `Room ${invite.room} joined. ${innerWidth < 900 ? 'Open chat below to talk.' : 'Press Enter to talk.'}`,
-      3000,
-    );
-  } catch (error) {
-    if (source !== game) return;
-    roomError = error instanceof Error ? error.message : 'The room could not be reached.';
-    togetherMenu();
-  } finally {
-    joiningPublic = false;
+    if (ownsPanel())
+      toast(
+        `Room ${invite.room} joined. ${innerWidth < 900 ? 'Open chat below to talk.' : 'Press Enter to talk.'}`,
+        3000,
+      );
+  } else if (result.status === 'failed') {
+    roomError = errorMessage(result.error, 'The room could not be reached.');
+    if (ownsPanel()) togetherMenu();
   }
 }
+async function installFromPanel() {
+  const ownsPanel = ownsCurrentPanel();
+  try {
+    const message = await requestInstall();
+    if (ownsPanel()) toast(message);
+  } catch (error) {
+    if (ownsPanel()) toast(errorMessage(error, 'The install request could not finish.'));
+  }
+}
+function errorMessage(error: unknown, fallback = 'The action could not finish. Please try again.') {
+  return error instanceof Error ? error.message : fallback;
+}
 async function findRoom(raw: string) {
-  if (findingRoom) return;
+  if (panelRequest.pending) return;
   const invite = readRoomInput(raw);
   if (invite) {
     choosePlanet(invite.seed, invite.generation, invite);
@@ -998,36 +1098,36 @@ async function findRoom(raw: string) {
     });
     return;
   }
-  findingRoom = true;
+  const operation = panelRequest.start('lookup'),
+    ownsPanel = ownsCurrentPanel();
   const endpoint =
     /^U[1-4][A-Z0-9]{7}$/.test(code) || /^[A-F0-9]{10}$/.test(code) ? 'peer:' : worldNodeEndpoint();
   toast('Looking up this room’s planet…', 40000);
-  const revision = modalRevision;
-  try {
+  const result = await operation.run(async () => {
     const { discoverRoom } = await import('./multiplayer');
-    const found = await discoverRoom(endpoint, code);
-    if (revision !== modalRevision) return;
+    if (!operation.current) throw Error('Room lookup cancelled.');
+    return discoverRoom(endpoint, code);
+  });
+  if (!operation.current || !ownsPanel()) return;
+  if (result.status === 'succeeded') {
     const invite = {
       room: code,
       endpoint,
-      seed: found.seed,
-      generation: found.generation,
+      seed: result.value.seed,
+      generation: result.value.generation,
     };
     choosePlanet(invite.seed, invite.generation, invite);
-  } catch (error) {
-    toast(
-      error instanceof Error
-        ? error.message
-        : 'The room host could not be reached. Ask your friend for the new complete room code.',
+  } else if (result.status === 'failed') {
+    const message = errorMessage(
+      result.error,
+      'The room host could not be reached. Ask your friend for the new complete room code.',
     );
+    toast(message);
     const notice = document.getElementById('v-title-room-error');
     if (notice) {
       notice.hidden = false;
-      notice.textContent =
-        error instanceof Error ? error.message : 'Could not reach the room host.';
+      notice.textContent = message;
     }
-  } finally {
-    findingRoom = false;
   }
 }
 function galaxyMenu() {
@@ -1133,7 +1233,7 @@ const recovering = [
     'Your body recovers. The unanswered questions remain.',
   ],
 ];
-function transfer(kind: 'opening' | 'arrival' | 'return' | 'clinic', after?: () => void) {
+function transfer(kind: TransferKind, after?: () => void, replay = false) {
   cancelPlacement();
   inputSequences.transition();
   voiceUi.release();
@@ -1142,14 +1242,10 @@ function transfer(kind: 'opening' | 'arrival' | 'return' | 'clinic', after?: () 
   keys.clear();
   walk = [];
   game.dialogue = null;
-  transferKind = kind;
-  introPage = 0;
+  narrative.start(kind, game, performance.now(), after, replay);
   el('s-intro-controls').hidden = kind !== 'opening';
   el('s-skip').textContent = kind === 'opening' ? 'Begin in 3886 · skip recollection' : 'Continue';
   el('s-transfer').classList.toggle('is-opening', kind === 'opening');
-  pendingTransfer = after ?? null;
-  transferStarted = performance.now();
-  transferStep = -1;
   el('s-transfer').hidden = false;
   setInert(true);
   el(kind === 'opening' ? 's-intro-next' : 's-skip').focus({ preventScroll: true });
@@ -1157,18 +1253,18 @@ function transfer(kind: 'opening' | 'arrival' | 'return' | 'clinic', after?: () 
   audio.play(kind === 'clinic' ? 'breath' : 'mind-transfer');
 }
 function endTransfer() {
-  if (pendingTransfer) {
-    pendingTransfer();
-    ignoreNextTransfer = game.phase === 'playing';
+  const completed = narrative.finish(game);
+  if (!completed) return;
+  if (completed.after) {
+    completed.after();
+    if (completed.scope !== game || narrative.active) return;
+    if (game.phase === 'playing') ignoreNextTransfer = game;
   }
-  pendingTransfer = null;
-  transferStarted = 0;
   el('s-transfer').hidden = true;
   setInert(false);
   paused = false;
   canvas.focus({ preventScroll: true });
-  if (replayingIntro) {
-    replayingIntro = false;
+  if (completed.replay) {
     journal();
     return;
   }
@@ -1183,9 +1279,9 @@ function endTransfer() {
     return;
   }
   toast(
-    transferKind === 'opening'
+    completed.kind === 'opening'
       ? 'Cequin helps this body breathe. Speak to the botanist beside the garden.'
-      : transferKind === 'arrival'
+      : completed.kind === 'arrival'
         ? `${game.player.name} wakes in ${game.originName}. ${game.personalStory?.case.title ?? 'A life is already in motion'}. Find the people involved.`
         : 'Your mind settles. This life continues.',
     7000,
@@ -1193,42 +1289,45 @@ function endTransfer() {
 }
 el('s-skip').onclick = endTransfer;
 function turnIntro(delta: number) {
-  if (introPage + delta >= opening.length) {
+  const active = narrative.active;
+  if (!active || active.kind !== 'opening') return;
+  if (active.page + delta >= opening.length) {
     endTransfer();
     return;
   }
-  introPage = Math.max(0, introPage + delta);
-  transferStep = -1;
+  active.page = Math.max(0, active.page + delta);
+  active.step = -1;
 }
 el('s-intro-next').onclick = () => turnIntro(1);
 el('s-intro-prev').onclick = () => turnIntro(-1);
 function updateTransfer(now: number) {
-  if (!transferStarted) return;
+  const active = narrative.active;
+  if (!active) return;
   const lines =
-      transferKind === 'opening'
+      active.kind === 'opening'
         ? opening
-        : transferKind === 'arrival'
+        : active.kind === 'arrival'
           ? arriving
-          : transferKind === 'clinic'
+          : active.kind === 'clinic'
             ? recovering
             : returning,
-    seconds = Math.max(0, (now - transferStarted) / 1000);
+    seconds = Math.max(0, (now - active.startedAt) / 1000);
   const duration = reducedMotion.matches ? 2.5 : 3.1;
   const step =
-    transferKind === 'opening'
-      ? introPage
+    active.kind === 'opening'
+      ? active.page
       : Math.max(0, Math.min(lines.length - 1, Math.floor(seconds / duration)));
-  if (step !== transferStep) {
-    transferStep = step;
+  if (step !== active.step) {
+    active.step = step;
     el('s-transfer-time').textContent = lines[step][0];
     el('s-transfer-line').textContent = lines[step][1];
     el('s-transfer-sub').textContent = lines[step][2];
     el('s-transfer').dataset.step = String(step);
-    if (transferKind === 'opening') {
+    if (active.kind === 'opening') {
       el<HTMLButtonElement>('s-intro-prev').disabled = step === 0;
       el('s-intro-next').textContent =
         step === lines.length - 1
-          ? replayingIntro
+          ? active.replay
             ? 'Return to the notebook'
             : 'Wake in Vespera'
           : 'Continue →';
@@ -1240,10 +1339,10 @@ function updateTransfer(now: number) {
   el('s-transfer').style.setProperty(
     '--transfer',
     String(
-      transferKind === 'opening' ? 0.55 + Math.sin(seconds * 0.6) * 0.15 : Math.sin(Math.PI * p),
+      active.kind === 'opening' ? 0.55 + Math.sin(seconds * 0.6) * 0.15 : Math.sin(Math.PI * p),
     ),
   );
-  if (p >= 1 && transferKind !== 'opening') endTransfer();
+  if (p >= 1 && active.kind !== 'opening') endTransfer();
 }
 
 function announcementMenu() {
@@ -1341,8 +1440,10 @@ function soundSettings() {
       )
       .join(
         '',
-      )}</div><div class="s-menu-buttons"><button id="v-audio-enable">${settings.muted ? 'Unmute game sound' : audio.needsGesture ? 'Enable game sound' : 'Mute game sound'}</button><button id="v-audio-preview">Listen to this place</button><button id="v-audio-voice">Nearby voices & microphone</button><button id="v-audio-return" class="s-primary">Return to the world</button></div><details class="v-app-diagnostics"><summary>App & audio diagnostics</summary><p>${esc(mode.label)}<br>${esc(mode.source)}<br>Launch handling: ${mode.launchQueueSupported ? 'supported' : 'unavailable'}${mode.launchObserved ? ' · launch observed' : ''}<br>Viewport: ${mobileViewport.diagnostics.height}px · ${mobileViewport.diagnostics.visualViewport ? 'visual viewport tracked' : 'window size fallback'}<br>Soundscape: ${esc(audio.getDiagnostics().zone)} · ${esc(game.worldTime.label)}</p><p>Browsers cannot reliably tell whether another installation exists. Bluetooth routing and interruptions are controlled by your device.</p><button id="v-settings-install">Install Verso</button><button id="v-ai">Experimental companion setup</button></details>`,
+      )}</div><div class="s-menu-buttons"><button id="v-audio-enable">${settings.muted ? 'Unmute game sound' : audio.needsGesture ? 'Enable game sound' : 'Mute game sound'}</button><button id="v-audio-preview">Listen to this place</button><button id="v-audio-voice">Nearby voices & microphone</button><button id="v-audio-return" class="s-primary">Return to the world</button></div><details class="v-app-diagnostics"><summary>App & audio diagnostics</summary><p>${esc(mode.label)}<br>${esc(mode.source)}<br>Launch handling: ${mode.launchQueueSupported ? 'supported' : 'unavailable'}${mode.launchObserved ? ' · launch observed' : ''}<br>Viewport: ${mobileViewport.diagnostics.height}px · ${mobileViewport.diagnostics.visualViewport ? 'visual viewport tracked' : 'window size fallback'}<br>Soundscape: ${esc(audio.getDiagnostics().zone)} · ${esc(game.worldTime.label)}</p><p id="v-offline-status" role="status"></p><button id="v-offline-retry" hidden>Retry offline preparation</button><p id="v-lease-status"></p><p>Browsers cannot reliably tell whether another installation exists. Bluetooth routing and interruptions are controlled by your device.</p><button id="v-settings-install">Install Verso</button><button id="v-ai">Experimental companion setup</button></details>`,
   );
+  renderPersistenceStatus();
+  el('v-offline-retry').onclick = () => void registerOffline();
   el('v-ai').onclick = aiMenu;
   const revision = modalRevision;
   const settingsPanel = el('s-modal');
@@ -1392,7 +1493,7 @@ function soundSettings() {
   };
   el('v-audio-voice').onclick = voiceUi.showSettings;
   el('v-audio-return').onclick = closeModal;
-  el('v-settings-install').onclick = () => void requestInstall().then(toast);
+  el('v-settings-install').onclick = () => void installFromPanel();
 }
 function quickWords() {
   openModal(
@@ -1425,7 +1526,7 @@ function quickWords() {
   el('v-words-edit').onclick = shortcutsMenu;
 }
 function pauseMenu() {
-  if (sharedActionPending) return;
+  if (foreground.pending) return;
   save();
   openModal(
     'pause',
@@ -1455,7 +1556,7 @@ function pauseMenu() {
   el('s-pause-life').onclick = () => lifeMenu();
   el('s-pause-together').onclick = togetherMenu;
   el('v-sound-settings').onclick = soundSettings;
-  el('v-install').onclick = () => void requestInstall().then(toast);
+  el('v-install').onclick = () => void installFromPanel();
 
   el('v-retire').onclick = () => {
     openModal(
@@ -1493,18 +1594,34 @@ async function aiMenu() {
     `<div class="v-window-heading"><h2>AI companion</h2><button id="v-ai-close" aria-label="Close">×</button></div><p>Player chat works directly in your room. Optional AI conversations require a trusted companion outside the browser.</p><p>AI conversations are not available in this release. You can still talk to real players through Local and Room chat.</p><details><summary>Advanced companion setup</summary><p>The optional local companion can check a native Codex login. It does not enable AI dialogue in this build.</p><form id="v-ai-pair"><label>Local companion pairing code<input id="v-ai-code" autocomplete="off" maxlength="100"></label><button>Check companion</button></form><p id="v-ai-status" role="status">Start the optional companion with <code>node server/ai-companion.mjs</code>, then enter its pairing code. No AI requests run automatically.</p><a href="${esc(aiCompanionGuide)}" target="_blank" rel="noopener">Read companion setup notes</a></details>`,
   );
   el('v-ai-close').onclick = closeModal;
-  el<HTMLFormElement>('v-ai-pair').onsubmit = async (e) => {
+  const input = el<HTMLInputElement>('v-ai-code');
+  const status = el('v-ai-status');
+  const form = el<HTMLFormElement>('v-ai-pair');
+  const submit = form.querySelector<HTMLButtonElement>('button')!;
+  const ownsPanel = ownsCurrentPanel();
+  let companion: import('./ai-companion').AICompanion | null = null;
+  disposeSpecial = () => companion?.cancelPending();
+  form.onsubmit = async (e) => {
     e.preventDefault();
-    try {
+    if (panelRequest.pending) return;
+    const code = input.value;
+    const operation = panelRequest.start('companion');
+    submit.disabled = true;
+    status.textContent = 'Checking the local companion…';
+    const result = await operation.run(async () => {
       const { AICompanion } = await import('./ai-companion');
-      const companion = new AICompanion();
-      const state = await companion.pair(el<HTMLInputElement>('v-ai-code').value);
-      el('v-ai-status').textContent =
-        `Codex ${state.version ?? ''} · ${state.auth}. ${state.reason}`;
-      el<HTMLInputElement>('v-ai-code').value = '';
-    } catch (error) {
-      el('v-ai-status').textContent =
-        error instanceof Error ? error.message : 'Could not reach the companion.';
+      if (!operation.current || !ownsPanel()) throw Error('Companion check cancelled.');
+      companion = new AICompanion();
+      return companion.pair(code);
+    });
+    if (!operation.current || !ownsPanel()) return;
+    submit.disabled = false;
+    if (result.status === 'succeeded') {
+      const state = result.value;
+      status.textContent = `Codex ${state.version ?? ''} · ${state.auth}. ${state.reason}`;
+      if (input.value === code) input.value = '';
+    } else if (result.status === 'failed') {
+      status.textContent = errorMessage(result.error, 'Could not reach the companion.');
     }
   };
 }
@@ -1594,6 +1711,24 @@ function journal(section?: NotebookSection) {
     notebookView.open = true;
   }
   openModal('journal', notebookHtml(game, notebookView));
+  const threads = el('s-modal').querySelector('.s-threads-leaf');
+  if (threads && game.activeSupplyJobs.length) {
+    threads.insertAdjacentHTML(
+      'beforeend',
+      `<section class="s-supply-jobs"><h3>Supply promises</h3>${game.activeSupplyJobs.map((job) => `<article><p>${job.amount} ${esc(game.itemName(job.item))} for ${esc(job.recipientName)}.${job.reason ? ` ${esc(job.reason)}` : ''}</p><button data-withdraw-supply="${esc(job.npcId)}">Withdraw this promise</button><small>Keep your supplies; no delivery reward is claimed.</small></article>`).join('')}</section>`,
+    );
+    threads.querySelectorAll<HTMLButtonElement>('[data-withdraw-supply]').forEach((button) => {
+      button.onclick = () => {
+        const result = game.cancelSupply(button.dataset.withdrawSupply!);
+        if (result.ok) {
+          save();
+          journal('threads');
+        }
+        toast(result.message);
+      };
+    });
+  }
+
   const refresh = (focus = '#s-leaf-title') => {
     journal();
     el('s-modal').querySelector<HTMLElement>(focus)?.focus({ preventScroll: true });
@@ -1656,8 +1791,7 @@ function journal(section?: NotebookSection) {
   const introButton = el('s-notebook-intro');
   if (introButton)
     introButton.onclick = () => {
-      replayingIntro = true;
-      transfer('opening');
+      transfer('opening', undefined, true);
     };
   const search = el<HTMLInputElement>('s-glossary-search');
   if (search)
@@ -1880,6 +2014,7 @@ function inventory(view: 'pack' | 'craft' = packView) {
   updatePack();
 }
 function updatePack() {
+  if (selectedItem && !((game.inventory[selectedItem] ?? 0) > 0)) selectedItem = null;
   const signature = JSON.stringify([
     game.inventory,
     game.artifacts.map((a) => [a.design, a.equipped]),
@@ -1932,8 +2067,10 @@ function updatePack() {
 }
 let tradeTab: 'buy' | 'sell' = 'buy';
 let tradeSelection = '';
+let tradeQuantity = 1;
+let tradeNpc: string | null = null;
 function updateDialogue() {
-  if (modal || transferStarted) {
+  if (modal || narrative.active) {
     el('s-dialogue').hidden = true;
     return;
   }
@@ -1941,6 +2078,29 @@ function updateDialogue() {
   el('s-dialogue').hidden = !d;
   const signature = JSON.stringify(d);
   if (signature === dialogueSignature) return;
+  const priorFocus =
+    document.activeElement instanceof HTMLElement &&
+    el('s-dialogue').contains(document.activeElement)
+      ? document.activeElement
+      : null;
+  const sameTrader = !!d?.npcId && tradeNpc === d.npcId;
+  const focusSelector =
+    sameTrader && priorFocus
+      ? priorFocus.id
+        ? `#${CSS.escape(priorFocus.id)}`
+        : ['data-trade-tab', 'data-trade-select', 'data-choice']
+            .map((attribute) => {
+              const value = priorFocus.getAttribute(attribute);
+              return value === null ? '' : `[${attribute}="${CSS.escape(value)}"]`;
+            })
+            .find(Boolean)
+      : undefined;
+  if (!sameTrader) {
+    tradeQuantity = 1;
+    tradeSelection = '';
+    tradeTab = 'buy';
+  }
+  tradeNpc = d?.npcId ?? null;
   inputSequences.transition();
   dialogueSignature = signature;
   if (!d) return;
@@ -2014,8 +2174,16 @@ function updateDialogue() {
             );
       for (const option of [...quantitySelect.options])
         option.disabled = Number(option.value) > max;
+      const quantities = [...quantitySelect.options]
+        .filter((option) => !option.disabled)
+        .map((option) => Number(option.value));
+      tradeQuantity =
+        quantities.filter((count) => count <= tradeQuantity).at(-1) ?? quantities[0] ?? 1;
+      quantitySelect.value = String(tradeQuantity);
+      quantitySelect.disabled = quantities.length === 0;
       quantitySelect.onchange = () => {
         const count = Number(quantitySelect.value);
+        tradeQuantity = count;
         el('v-trade-confirm').textContent =
           `${tradeTab === 'sell' ? 'Sell' : 'Buy'} ${count} · ${unitPrice * count} coins`;
       };
@@ -2035,7 +2203,12 @@ function updateDialogue() {
         updateUI();
       };
   }
-  el('s-dialogue-close').focus({ preventScroll: true });
+  const restoredFocus = focusSelector
+    ? el('s-dialogue').querySelector<HTMLElement>(focusSelector)
+    : null;
+  if (restoredFocus && !(restoredFocus as HTMLButtonElement).disabled)
+    restoredFocus.focus({ preventScroll: true });
+  else if (!sameTrader || priorFocus) el('s-dialogue-close').focus({ preventScroll: true });
   el('s-dialogue-close').onclick = () => {
     game.dialogue = null;
     updateDialogue();
@@ -2043,6 +2216,10 @@ function updateDialogue() {
   };
 }
 function updateUI() {
+  renderPersistenceStatus();
+  const chatForm = el<HTMLFormElement>('v-chat-form');
+  chatForm.setAttribute('aria-busy', String(chatRequest.pending));
+  chatForm.querySelector<HTMLButtonElement>('button[type=submit]')!.disabled = chatRequest.pending;
   if (modal === 'living-systems') livingUi.update();
   const interaction = currentInteraction();
   const techniquePair = game.techniques;
@@ -2285,7 +2462,7 @@ function updateUI() {
   el('s-ward-cooldown').style.height = `${Math.min(100, (p.wardCooldown / 8) * 100)}%`;
   const near = game.nearby();
   const context = el<HTMLButtonElement>('s-context');
-  context.hidden = !near || !!game.dialogue || !!modal || !!transferStarted;
+  context.hidden = !near || !!game.dialogue || !!modal || !!narrative.active;
   if (near)
     context.textContent = `E · ${'role' in near ? 'Speak to ' + near.name : (({ cequin: 'Gather cequin', heartleaf: 'Gather heartleaf', emberroot: 'Gather emberroot', pine: 'Gather wood', rock: 'Mine stone', chest: 'Open chest', radio: 'Listen to the radio', workbench: 'Use workbench', shrine: 'Rest and remember', notice: 'Read the notice', door: game.opened.has(near.id) ? 'Close door' : 'Open door', bench: 'Rest here', crate: 'Search crate' } as Record<string, string>)[near.kind] ?? near.name)}`;
   if (near && !('role' in near)) {
@@ -2317,7 +2494,7 @@ function lifeMenu(
   initialTab: 'purpose' | 'forge' | 'discover' | 'estate' = 'purpose',
   initialDesign?: string,
 ) {
-  if (sharedActionPending) return;
+  if (foreground.pending) return;
   openModal(
     'life',
     '<span class="s-chapter">A life of your choosing</span><h2>What will you make of it?</h2><div id="s-life-content"></div><button id="s-life-return" class="s-primary">Return to the world</button>',
@@ -2371,7 +2548,7 @@ function roomIdentity() {
   };
 }
 function togetherMenu() {
-  if (sharedActionPending) return;
+  if (foreground.pending) return;
   const active = multiplayer.status === 'online',
     browserRoom = roomServer === 'peer:',
     completeCode = hasCompleteRoomAddress(roomServer);
@@ -2403,7 +2580,7 @@ function togetherMenu() {
                   .join('')}</div>`
               : ''
           }<button id="v-room-public">Meet people on this planet</button><p class="v-muted">A public frequency lets travelers meet on this planet without an invitation. Complete codes include the planet. The default world node preserves shared rooms while browsers are closed; browser rooms remain available in Connection options. Personal lives stay in this browser.</p>`
-    }<p id="v-network-status" class="v-muted" role="status"></p>`,
+    }<p id="v-network-status" class="v-muted" role="status"></p><p id="v-room-durability" role="status"></p>`,
   );
   renderNetworkStatus();
   el('s-room-return').onclick = closeModal;
@@ -2426,10 +2603,12 @@ function togetherMenu() {
       });
     };
   const copy = async (text: string) => {
+    const ownsPanel = ownsCurrentPanel();
     try {
       await navigator.clipboard.writeText(text);
-      toast('Copied.');
+      if (ownsPanel()) toast('Copied.');
     } catch {
+      if (!ownsPanel()) return;
       const input = el<HTMLInputElement>('s-room-invitation');
       input?.select();
       toast('Select and copy the room link.');
@@ -2443,11 +2622,13 @@ function togetherMenu() {
     el('v-copy-code').onclick = () => void copy(codeToShare);
     el('s-room-copy').onclick = () => void copy(link);
     el('v-share-room').onclick = async () => {
+      const ownsPanel = ownsCurrentPanel();
       if (navigator.share)
         try {
           await navigator.share({ title: `Verso · room ${multiplayer.room}`, url: link });
         } catch (error) {
-          if (!(error instanceof DOMException && error.name === 'AbortError')) void copy(link);
+          if (ownsPanel() && !(error instanceof DOMException && error.name === 'AbortError'))
+            void copy(link);
         }
       else void copy(link);
     };
@@ -2488,11 +2669,12 @@ function togetherMenu() {
     };
     el<HTMLFormElement>('s-room-form').onsubmit = async (e) => {
       e.preventDefault();
-      if (multiplayer.status === 'connecting') return;
-      const source = game,
-        revision = modalRevision;
-      roomName = el<HTMLInputElement>('s-room-name').value.trim() || game.player.name;
-      roomServer =
+      if (connectionRequest.pending || panelRequest.pending || multiplayer.status === 'connecting')
+        return;
+      const ownsPanel = ownsCurrentPanel();
+      const name = el<HTMLInputElement>('s-room-name').value.trim() || game.player.name;
+      let endpoint =
+        el<HTMLSelectElement>('s-room-mode').value === 'peer:' ||
         el<HTMLSelectElement>('s-room-mode').value === 'peer'
           ? 'peer:'
           : el<HTMLInputElement>('s-room-server').value.trim();
@@ -2505,64 +2687,121 @@ function togetherMenu() {
         toast('Use the room code, or leave it empty to host.');
         return;
       }
-      try {
-        localStorage.setItem('verso.room.name', roomName);
-        localStorage.setItem('verso.room.server', roomServer);
-        localStorage.setItem('verso.room.connection.v2', 'chosen');
-        if (code) {
-          if (addressed) roomServer = addressed.endpoint;
+      if (addressed) endpoint = addressed.endpoint;
+      if (code) {
+        const operation = panelRequest.start('lookup');
+        const found = await operation.run(async () => {
+          if (addressed) return addressed;
           const { discoverRoom } = await import('./multiplayer');
-          const info = addressed ?? (await discoverRoom(roomServer, code));
-          if (source !== game || revision !== modalRevision) return;
-          if (info.seed !== game.world.seed || info.generation !== game.world.generation) {
-            choosePlanet(info.seed, info.generation, {
-              seed: info.seed,
-              generation: info.generation,
-              room: code,
-              endpoint: roomServer,
-              ...(addressed?.public ? { public: true } : {}),
-            });
-            return;
+          if (!operation.current) throw Error('Room lookup cancelled.');
+          return discoverRoom(endpoint, code);
+        });
+        if (!operation.current || !ownsPanel()) return;
+        if (found.status !== 'succeeded') {
+          if (found.status === 'failed') {
+            roomError = errorMessage(found.error, 'Could not find this room.');
+            togetherMenu();
           }
+          return;
         }
-        if (addressed?.public && roomServer !== 'peer:')
-          await multiplayer.joinPublicWorld(roomServer, code || '', roomIdentity());
-        else await multiplayer.connect(roomServer, roomIdentity(), code || '');
-        if (modal === 'together') togetherMenu();
-        toast('Your room is ready. Share its code or link.');
-      } catch (error) {
-        roomError = error instanceof Error ? error.message : 'Could not reach this room.';
-        if (modal === 'together') togetherMenu();
+        const info = found.value;
+        if (info.seed !== game.world.seed || info.generation !== game.world.generation) {
+          choosePlanet(info.seed, info.generation, {
+            seed: info.seed,
+            generation: info.generation,
+            room: code,
+            endpoint,
+            ...(addressed?.public ? { public: true } : {}),
+          });
+          return;
+        }
       }
+      roomName = name;
+      roomServer = endpoint;
+      try {
+        localStorage.setItem('verso.room.name', name);
+        localStorage.setItem('verso.room.server', endpoint);
+        localStorage.setItem('verso.room.connection.v2', 'chosen');
+      } catch {
+        /* Storage preferences do not prevent a connection. */
+      }
+      await connectFromPanel(
+        'join',
+        () =>
+          addressed?.public && endpoint !== 'peer:'
+            ? multiplayer.joinPublicWorld(endpoint, code || '', roomIdentity())
+            : multiplayer.connect(endpoint, roomIdentity(), code || ''),
+        'Your room is ready. Share its code or link.',
+      );
     };
     const reconnect = document.getElementById('s-room-reconnect');
     if (reconnect)
-      reconnect.onclick = async () => {
-        roomError = '';
-        try {
-          await multiplayer.reconnect(roomIdentity());
-          togetherMenu();
-        } catch (error) {
-          roomError = error instanceof Error ? error.message : 'Could not reconnect.';
-          togetherMenu();
-        }
-      };
-    document.querySelectorAll<HTMLElement>('[data-resume-world]').forEach(
-      (n) =>
-        (n.onclick = async () => {
-          try {
+      reconnect.onclick = () =>
+        void connectFromPanel(
+          'reconnect',
+          () => multiplayer.reconnect(roomIdentity()),
+          'Your room connection is restored.',
+        );
+    document.querySelectorAll<HTMLElement>('[data-resume-world]').forEach((n) => {
+      const id = n.dataset.resumeWorld!;
+      n.onclick = () =>
+        void connectFromPanel(
+          'resume',
+          () => {
             roomServer = 'peer:';
-            await multiplayer.hostSavedWorld(n.dataset.resumeWorld!, roomIdentity());
-            togetherMenu();
-            toast('Your saved shared world is open again.');
-          } catch (error) {
-            roomError = error instanceof Error ? error.message : 'Could not resume this world.';
-            togetherMenu();
-          }
-        }),
-    );
+            return multiplayer.hostSavedWorld(id, roomIdentity());
+          },
+          'Your saved shared world is open again.',
+        );
+    });
   }
 }
+async function connectFromPanel(
+  kind: 'join' | 'reconnect' | 'resume',
+  connect: () => Promise<unknown>,
+  message: string,
+) {
+  if (connectionRequest.pending) return;
+  const operation = connectionRequest.start(kind),
+    ownsPanel = ownsCurrentPanel(),
+    source = game;
+  roomError = '';
+  const result = await operation.run(connect);
+  if (!operation.current || source !== game) return;
+  if (result.status === 'failed')
+    roomError = errorMessage(result.error, 'Could not reach this room.');
+  if (!ownsPanel()) return;
+  togetherMenu();
+  if (result.status === 'succeeded') toast(message);
+}
+function renderPersistenceStatus() {
+  const offline = document.getElementById('v-offline-status');
+  if (offline) offline.textContent = getOfflineStatus().message;
+  const retryOffline = document.getElementById('v-offline-retry');
+  if (retryOffline) retryOffline.hidden = getOfflineStatus().phase !== 'failed';
+  const lease = document.getElementById('v-lease-status');
+  if (lease) lease.textContent = lifeTabStatus().message ?? 'This tab owns the continuing life.';
+  const durable = document.getElementById('v-room-durability');
+  if (durable) {
+    const status = multiplayer.durability;
+    const saved =
+      status.lastSavedAt === null
+        ? 'No durable checkpoint has been confirmed.'
+        : `Last durable checkpoint: ${new Date(status.lastSavedAt).toLocaleString()}.`;
+    const message =
+      status.phase === 'degraded'
+        ? `Shared changes are paused until storage recovers. ${status.error ?? ''} ${saved}`
+        : status.phase === 'healthy'
+          ? saved
+          : status.phase === 'pending' || status.phase === 'saving'
+            ? `Saving shared changes. ${saved}`
+            : '';
+    durable.textContent = [message, multiplayer.credentialStorageError].filter(Boolean).join(' ');
+    durable.hidden = !durable.textContent;
+  }
+}
+multiplayer.onStorageChange = renderPersistenceStatus;
+subscribeOfflineStatus(renderPersistenceStatus);
 function renderNetworkStatus() {
   const target = document.getElementById('v-network-status');
   if (!target) return;
@@ -2601,16 +2840,18 @@ multiplayer.onChat = (message) => {
       until: performance.now() + 6500,
     });
 };
-async function say(text: string) {
+async function say(text: string, isCurrent = () => true): Promise<boolean> {
+  const source = game,
+    room = multiplayer.room;
   text = text.trim();
-  if (!text) return;
+  if (!text) return false;
   if (text === '/help') {
     appendChat(
       '',
       'Enter speaks. /say text reaches nearby travelers; /room text reaches your room. F7–F9 send your saved phrases. Say hi to greet a nearby resident.',
       true,
     );
-    return;
+    return true;
   }
   if (/^\/(room|world)\s/i.test(text)) {
     setChatChannel('world');
@@ -2620,23 +2861,38 @@ async function say(text: string) {
     text = text.replace(/^\/say\s+/, '');
   } else if (text.startsWith('/')) {
     appendChat('', 'Unknown command. Use /say, /room or /help.', true);
-    return;
+    return false;
   }
   if (text.length > 280) {
     appendChat('', 'Keep a message within 280 characters.', true);
-    return;
+    return false;
   }
+  const channel = chatChannel;
   if (multiplayer.status === 'online') {
-    const result = await multiplayer.sendChat(text, chatChannel);
-    if (!result.ok) appendChat('', result.reason || 'The message was not delivered.', true);
-  } else if (multiplayer.status === 'disconnected') {
+    try {
+      const result = await multiplayer.sendChat(text, channel);
+      if (!isCurrent() || source !== game || room !== multiplayer.room) return false;
+      if (!result.ok) {
+        appendChat('', result.reason || 'The message was not delivered. Your draft is kept.', true);
+        return false;
+      }
+    } catch (error) {
+      if (isCurrent() && source === game && room === multiplayer.room)
+        appendChat(
+          '',
+          errorMessage(error, 'The message was not delivered. Your draft is kept.'),
+          true,
+        );
+      return false;
+    }
+  } else if (multiplayer.status !== 'offline') {
     appendChat('', 'Reconnect to your room before speaking to its travelers.', true);
-    return;
-  } else if (chatChannel === 'world') {
+    return false;
+  } else if (channel === 'world') {
     appendChat('', 'Join or host a room to speak to other travelers.', true);
-    return;
+    return false;
   } else appendChat(game.player.name, text);
-  if (chatChannel === 'say' && /^(hi|hello|greetings|trade|job|work)[.!?]?$/i.test(text)) {
+  if (channel === 'say' && /^(hi|hello|greetings|trade|job|work)[.!?]?$/i.test(text)) {
     const npc = game.npcs
       .filter(
         (n) =>
@@ -2658,6 +2914,7 @@ async function say(text: string) {
       }
     }
   }
+  return true;
 }
 function shortcutsMenu() {
   openModal(
@@ -2696,16 +2953,38 @@ el('v-chat-input').addEventListener('compositionstart', () => {
 el('v-chat-input').addEventListener('compositionend', () => {
   chatComposing = false;
 });
-el<HTMLFormElement>('v-chat-form').onsubmit = (e) => {
+let chatDraftRevision = 0;
+el('v-chat-input').addEventListener('input', () => chatDraftRevision++);
+el<HTMLFormElement>('v-chat-form').onsubmit = async (e) => {
   e.preventDefault();
   const input = el<HTMLInputElement>('v-chat-input');
-  if (chatComposing) return;
-  const text = input.value;
+  if (chatComposing || chatRequest.pending || !input.value.trim()) return;
+  const text = input.value,
+    revision = chatDraftRevision,
+    ownsPanel = ownsCurrentPanel();
+  const operation = chatRequest.start('send');
+  updateUI();
+  const result = await operation.run(async () => {
+    const accepted = await say(text, () => operation.current);
+    if (!accepted) operation.settle('failed');
+    return accepted;
+  });
+  if (!operation.current) return;
+  updateUI();
+  if (result.status !== 'succeeded' || !result.value) return;
+  // Acknowledgement owns only the submitted draft, never text typed during the wait.
+  if (chatDraftRevision !== revision || input.value !== text) return;
   input.value = '';
-  input.blur();
-  setChatCollapsed(innerWidth < 900);
-  canvas.focus({ preventScroll: true });
-  void say(text);
+  chatDraftRevision++;
+  if (
+    ownsPanel() &&
+    !game.dialogue &&
+    (document.activeElement === input || input.form?.contains(document.activeElement))
+  ) {
+    input.blur();
+    setChatCollapsed(innerWidth < 900);
+    canvas.focus({ preventScroll: true });
+  }
 };
 // Focus owns input immediately; held gestures and routes cannot continue behind typing.
 root.addEventListener('focusin', (event) => {
@@ -2758,11 +3037,12 @@ document.querySelectorAll<HTMLElement>('[data-chat-channel]').forEach(
       setChatChannel(n.dataset.chatChannel as 'say' | 'world');
     }),
 );
-let productionSyncAt = 0,
-  productionSyncBusy = false;
+let productionSyncAt = 0;
 const registeredProduction = new Set<string>();
 const machineId = (localId: string) => `${getBrowserPlayerId()}:${localId}`;
 async function placeProduction(kind: ProductionKind, point: Point) {
+  if (foreground.pending) return;
+  const revision = placementRevision;
   const source = game,
     room = multiplayer.room,
     bodyId = game.bodyId;
@@ -2777,13 +3057,19 @@ async function placeProduction(kind: ProductionKind, point: Point) {
   }
   const id = machineId(source.nextProductionId);
   if (multiplayer.status === 'online') {
-    sharedActionPending = true;
+    const operation = foreground.start('world');
     keys.clear();
     walk = [];
     sendCombatPose(true, false);
-    try {
+    const outcome = await operation.run(async () => {
       const ack = await multiplayer.registerProductionMachine({ id, kind, ...preview.point });
-      if (source !== game || room !== multiplayer.room || bodyId !== source.bodyId) return;
+      if (
+        !operation.current ||
+        source !== game ||
+        room !== multiplayer.room ||
+        bodyId !== source.bodyId
+      )
+        return;
       if (!ack.ok) {
         toast(ack.reason || 'The room could not confirm this work site.');
         return;
@@ -2792,32 +3078,37 @@ async function placeProduction(kind: ProductionKind, point: Point) {
       const result = source.buildProduction(kind, preview.point);
       toast(result.message);
       if (result.ok) {
-        placingProduction = null;
+        if (placementRevision === revision) placingProduction = null;
         save();
       }
-    } finally {
-      sharedActionPending = false;
-    }
+    });
+    if (outcome.status === 'failed' && operation.current) toast(errorMessage(outcome.error));
   } else {
     const result = source.buildProduction(kind, preview.point);
     toast(result.message);
     if (result.ok) {
-      placingProduction = null;
+      if (placementRevision === revision) placingProduction = null;
       save();
     }
   }
 }
 async function syncProduction(now: number) {
-  if (productionSyncBusy || multiplayer.status !== 'online' || now - productionSyncAt < 1500)
+  if (productionRequest.pending || multiplayer.status !== 'online' || now - productionSyncAt < 1500)
     return;
   productionSyncAt = now;
-  productionSyncBusy = true;
+  const operation = productionRequest.start('sync');
   const source = game,
     room = multiplayer.room;
   const bodyId = source.bodyId;
-  try {
+  const outcome = await operation.run(async () => {
     for (const structure of source.productionStructures) {
-      if (source !== game || room !== multiplayer.room || bodyId !== source.bodyId) break;
+      if (
+        !operation.current ||
+        source !== game ||
+        room !== multiplayer.room ||
+        bodyId !== source.bodyId
+      )
+        break;
       const id = machineId(structure.id);
       if (
         !registeredProduction.has(id) &&
@@ -2829,12 +3120,18 @@ async function syncProduction(now: number) {
           x: structure.x,
           y: structure.y,
         });
-        if (source !== game || room !== multiplayer.room || bodyId !== source.bodyId) break;
+        if (
+          !operation.current ||
+          source !== game ||
+          room !== multiplayer.room ||
+          bodyId !== source.bodyId
+        )
+          break;
         if (ack.ok) registeredProduction.add(id);
       }
     }
     for (const claim of source.pendingProductionClaims) {
-      if (source !== game || room !== multiplayer.room) break;
+      if (!operation.current || source !== game || room !== multiplayer.room) break;
       const id = machineId(claim.structureId);
       if (!registeredProduction.has(id)) continue;
       const ack = await multiplayer.productionClaim(
@@ -2843,15 +3140,13 @@ async function syncProduction(now: number) {
         claim.sourceId,
         claim,
       );
-      if (source !== game || room !== multiplayer.room) break;
+      if (!operation.current || source !== game || room !== multiplayer.room) break;
       if (ack.ok) source.commitProductionClaim(claim.structureId, claim.jobId, claim.sourceId);
       else if (multiplayer.status === 'online')
         source.rejectProductionClaim(claim.structureId, claim.jobId, claim.sourceId, ack.reason);
       save();
     }
-  } finally {
-    productionSyncBusy = false;
-  }
+  });
 }
 function workMenu() {
   if (!started) return;
@@ -2953,6 +3248,7 @@ function workMenu() {
   document.querySelectorAll<HTMLElement>('[data-build-kind]').forEach(
     (n) =>
       (n.onclick = () => {
+        placementRevision++;
         placingProduction = n.dataset.buildKind as ProductionKind;
         closeModal();
         toast('Choose a clear 3×3 patch within two paces. Click to build; Escape cancels.', 8000);
@@ -3088,7 +3384,11 @@ multiplayer.onSystemEvents = (events) => game.acceptSystemEvents(events);
 multiplayer.onSystems = (frame) => {
   const space = game.spaceId;
   game.applySystemsFrame(frame, multiplayer.peerId, multiplayer.room);
-  if (space !== game.spaceId) inputSequences.transition();
+  if (space !== game.spaceId) {
+    resetWorldSelection();
+    cancelPlacement();
+    inputSequences.transition();
+  }
   if (modal === 'living-systems') livingUi.update();
 };
 multiplayer.onSystemsCorrection = (point, reason) => {
@@ -3097,7 +3397,18 @@ multiplayer.onSystemsCorrection = (point, reason) => {
   toast(reason);
 };
 multiplayer.onLiving = (frame) => game.applyLivingWorldFrame(frame);
+let authorityScope = `${multiplayer.status}:${multiplayer.room}:${multiplayer.peerId}`;
 multiplayer.onChange = () => {
+  const nextScope = `${multiplayer.status}:${multiplayer.room}:${multiplayer.peerId}`;
+  if (authorityScope !== nextScope) {
+    authorityScope = nextScope;
+    foreground.cancel();
+    productionRequest.cancel();
+    chatRequest.cancel();
+    productionSyncAt = 0;
+    inputSequences.transition();
+    if (!modal && !narrative.active) setInert(false);
+  }
   root.classList.toggle('solo', multiplayer.status === 'offline');
   if (multiplayer.status !== 'online') game.clearLivingWorldAuthority();
   voiceUi.update();
@@ -3135,7 +3446,13 @@ multiplayer.onChange = () => {
       } catch {}
     }
 
-    if (modal === 'together' && multiplayer.status !== 'connecting') togetherMenu();
+    if (
+      modal === 'together' &&
+      multiplayer.status !== 'connecting' &&
+      !connectionRequest.pending &&
+      !panelRequest.pending
+    )
+      togetherMenu();
   }
 };
 multiplayer.onMessage = (text) => toast(text, 7000);
@@ -3153,7 +3470,7 @@ multiplayer.onCombat = (frame) => {
 };
 function sendCombatPose(
   force = false,
-  active = started && !paused && !game.dialogue && !transferStarted && game.phase === 'playing',
+  active = started && !paused && !game.dialogue && !narrative.active && game.phase === 'playing',
 ) {
   multiplayer.pose(
     game.player,
@@ -3197,13 +3514,14 @@ multiplayer.onWorld = (change) => {
   save();
 };
 async function interactShared(id?: string, keepRoute = false) {
-  if (sharedActionPending || game.phase !== 'playing') return;
+  const source = game;
+  if (foreground.pending || game.phase !== 'playing') return;
   const fieldDrop = game.livingSystemsFrame?.economy.drops.find(
     (d) => (!id || d.id === id) && Math.hypot(d.x - game.player.x, d.y - game.player.y) < 2.2,
   );
   if (fieldDrop) {
     const result = await fieldAction({ kind: 'claim', targetId: fieldDrop.id });
-    toast(result.message);
+    if (source === game) toast(result.message);
     return;
   }
   if (game.spaceId !== 'surface') {
@@ -3218,7 +3536,7 @@ async function interactShared(id?: string, keepRoute = false) {
       )[0];
     if (feature) {
       const result = await fieldAction({ kind: 'underworld-interact', targetId: feature.id });
-      toast(result.message);
+      if (source === game) toast(result.message);
     } else livingUi.open('field');
     return;
   }
@@ -3232,7 +3550,7 @@ async function interactShared(id?: string, keepRoute = false) {
       kind: 'underworld-enter',
       settlementId: entrance.settlementId,
     });
-    toast(result.message);
+    if (source === game) toast(result.message);
     return;
   }
   const target = id
@@ -3302,14 +3620,15 @@ async function interactShared(id?: string, keepRoute = false) {
     save();
     return;
   }
+  const authority = `${multiplayer.room}:${multiplayer.peerId}`;
   const current = game,
     desiredOpen = !game.opened.has(target.id);
-  sharedActionPending = true;
+  const operation = foreground.start('world');
   keys.clear();
   if (!keepRoute) walk = [];
   setInert(true);
   sendCombatPose(true);
-  try {
+  const outcome = await operation.run(async () => {
     const result =
       target.kind === 'door'
         ? await multiplayer.door(target.id, desiredOpen)
@@ -3319,7 +3638,12 @@ async function interactShared(id?: string, keepRoute = false) {
             target,
             available.toolKind,
           );
-    if (current !== game) return;
+    if (
+      !operation.current ||
+      current !== game ||
+      authority !== `${multiplayer.room}:${multiplayer.peerId}`
+    )
+      return;
     if (result.ok) {
       if (target.kind !== 'door' || game.opened.has(target.id) !== desiredOpen)
         game.interact(target.id);
@@ -3329,14 +3653,17 @@ async function interactShared(id?: string, keepRoute = false) {
       if (keepRoute) walk = [];
       toast(result.reason ?? 'Another traveler reached it first.');
     }
-  } finally {
-    sharedActionPending = false;
-    if (!modal && !transferStarted) setInert(false);
-    if (document.hidden && !modal && !transferStarted) pauseMenu();
+  });
+  if (outcome.status === 'failed' && operation.current) toast(errorMessage(outcome.error));
+  if (operation.current) {
+    if (!modal && !narrative.active) setInert(false);
+    if (document.hidden && !modal && !narrative.active) pauseMenu();
   }
 }
 async function combatShared(kind: 'attack' | 'ward') {
-  if (sharedActionPending || game.phase !== 'playing') return;
+  const source = game,
+    body = game.bodyId;
+  if (foreground.pending || game.phase !== 'playing') return;
   if (game.underworldFrame) {
     const attack =
       kind === 'ward'
@@ -3361,7 +3688,8 @@ async function combatShared(kind: 'attack' | 'ward') {
     if (person && Math.hypot(person.x - game.player.x, person.y - game.player.y) < 8) {
       const heading = Math.atan2(person.y - game.player.y, person.x - game.player.x);
       const result = await fieldAction({ kind: 'person-attack', targetId: person.id, heading });
-      if (result.ok) game.showSystemAttack('melee', heading);
+      if (result.ok && source === game && body === game.bodyId)
+        game.showSystemAttack('melee', heading);
       return;
     }
     const animal = game.fauna
@@ -3377,7 +3705,7 @@ async function combatShared(kind: 'attack' | 'ward') {
       )[0];
     if (animal) {
       const result = await fieldAction({ kind: 'hunt', targetId: animal.id });
-      if (result.ok) {
+      if (result.ok && source === game && body === game.bodyId) {
         game.showSystemAttack(
           'melee',
           Math.atan2(animal.y - game.player.y, animal.x - game.player.x),
@@ -3410,25 +3738,32 @@ async function combatShared(kind: 'attack' | 'ward') {
     toast(preview.message);
     return;
   }
+  const authority = `${multiplayer.room}:${multiplayer.peerId}`;
   const current = game;
-  sharedActionPending = true;
-  combatPending = true;
+  const operation = foreground.start('combat');
   walk = [];
   sendCombatPose(true, true);
-  try {
+  const outcome = await operation.run(async () => {
     const result = await multiplayer.combat(kind, preview.heading);
-    if (current !== game) return;
+    if (
+      !operation.current ||
+      current !== game ||
+      authority !== `${multiplayer.room}:${multiplayer.peerId}`
+    )
+      return;
     if (result.ok) game.commitSharedCombatAction(kind, preview.heading, preview.bodyId);
     else toast(result.reason ?? 'That action could not reach the shared world.');
     updateUI();
     save();
-  } finally {
-    sharedActionPending = false;
-    combatPending = false;
-    if (document.hidden && !modal && !transferStarted) pauseMenu();
+  });
+  if (outcome.status === 'failed' && operation.current) toast(errorMessage(outcome.error));
+  if (operation.current) {
+    if (document.hidden && !modal && !narrative.active) pauseMenu();
   }
 }
 async function dungeonAttack(attack: 'melee' | 'ranged' | 'spell' | 'guard') {
+  const source = game,
+    body = game.bodyId;
   if (!currentInteraction().capabilities.combat.allowed || game.player.attackCooldown > 0) return;
   const enemy = game.underworldFrame?.state.enemies
     .filter((e) => e.hp > 0)
@@ -3442,15 +3777,18 @@ async function dungeonAttack(attack: 'melee' | 'ranged' | 'spell' | 'guard') {
     ? Math.atan2(target.y - game.player.y, target.x - game.player.x)
     : game.player.heading;
   const result = await fieldAction({ kind: 'underworld-attack', attack, heading });
+  if (game !== source || game.bodyId !== body) return;
   if (result.ok) game.showSystemAttack(attack, heading);
   else game.player.attackCooldown = 0.15;
 }
 async function stepPlayer(heading = game.player.heading) {
+  const source = game,
+    body = game.bodyId;
   if (!currentInteraction().capabilities.combat.allowed) return;
   if (game.spaceId !== 'surface') {
-    if (sharedActionPending || game.dodgeCooldown > 0) return;
+    if (foreground.pending || game.dodgeCooldown > 0) return;
     const result = await fieldAction({ kind: 'underworld-attack', attack: 'dodge', heading });
-    if (!result.ok) return;
+    if (!result.ok || source !== game || body !== game.bodyId) return;
   }
   game.dodge(heading);
 }
@@ -3476,25 +3814,28 @@ async function useTechnique(id: TechniqueId) {
     toast('This room runs an earlier build. Ordinary attacks and wards still work.');
     return;
   }
+  const authority = `${multiplayer.room}:${multiplayer.peerId}`;
   const current = game;
-  sharedActionPending = true;
-  combatPending = true;
+  const operation = foreground.start('combat');
   walk = [];
   sendCombatPose(true, true);
-  try {
+  const outcome = await operation.run(async () => {
     const result = await multiplayer.technique(id, preview.heading);
-    if (current !== game) return;
+    if (
+      !operation.current ||
+      current !== game ||
+      authority !== `${multiplayer.room}:${multiplayer.peerId}`
+    )
+      return;
     if (result.ok) game.commitTechnique(id, preview.heading, preview.bodyId);
     else toast(result.reason ?? 'The room could not accept the technique.');
     updateUI();
     save();
-  } finally {
-    sharedActionPending = false;
-    combatPending = false;
-  }
+  });
+  if (outcome.status === 'failed' && operation.current) toast(errorMessage(outcome.error));
 }
 async function parleyShared() {
-  if (sharedActionPending) return;
+  if (foreground.pending) return;
   if (multiplayer.status !== 'online') {
     toast('Reconnect to ask for a shared truce.');
     return;
@@ -3504,22 +3845,29 @@ async function parleyShared() {
     toast(preview.message);
     return;
   }
+  const authority = `${multiplayer.room}:${multiplayer.peerId}`;
   const current = game;
-  sharedActionPending = true;
+  const operation = foreground.start('world');
   keys.clear();
   setInert(true);
   sendCombatPose(true, false);
-  try {
+  const outcome = await operation.run(async () => {
     const result = await multiplayer.parley(preview.guardIds);
-    if (current !== game) return;
+    if (
+      !operation.current ||
+      current !== game ||
+      authority !== `${multiplayer.room}:${multiplayer.peerId}`
+    )
+      return;
     if (result.ok) toast(game.commitSharedParley(preview.stepId, preview.bodyId).message);
     else toast(result.reason ?? 'The guards did not accept the truce.');
     updateUI();
     drawMap();
     save();
-  } finally {
-    sharedActionPending = false;
-    if (!modal && !transferStarted) setInert(false);
+  });
+  if (outcome.status === 'failed' && operation.current) toast(errorMessage(outcome.error));
+  if (operation.current) {
+    if (!modal && !narrative.active) setInert(false);
   }
 }
 function act(command: string) {
@@ -3546,9 +3894,7 @@ function act(command: string) {
   save();
 }
 function pathTo(goal: Point): Point[] {
-  return findWalkingPath(game.player, [goal], (x, y) =>
-    game.world.blocked(x, y, game.removed, true),
-  );
+  return findWalkingPath(game.player, [goal], (x, y) => game.navigationBlocked(x, y));
 }
 function approach(target: Prop | Npc) {
   const options: Point[] = [];
@@ -3565,7 +3911,7 @@ function approach(target: Prop | Npc) {
     updateUI();
     return;
   }
-  const destination = options.find((p) => !game.world.blocked(p.x, p.y, game.removed, true));
+  const destination = options.find((p) => !game.navigationBlocked(p.x, p.y));
   if (destination) {
     walk = [];
     travelTarget = target.id;
@@ -3748,7 +4094,7 @@ canvas.addEventListener(
 );
 root.addEventListener('click', (event) => {
   const button = (event.target as HTMLElement).closest<HTMLButtonElement>('button');
-  if (!button || sharedActionPending) return;
+  if (!button || foreground.pending) return;
   const d = button.dataset;
   audio.play('click');
   if (d.trackQuest) {
@@ -3790,11 +4136,16 @@ root.addEventListener('click', (event) => {
     const knownQuests = new Set(game.quests.map((q) => q.id));
     const sourceId = game.dialogue?.npcId;
     game.choose(d.choice);
-    const accepted = game.quests.find((q) => !knownQuests.has(q.id) && !q.complete);
+    const accepted = game.quests.find(
+      (q) => !knownQuests.has(q.id) && !q.complete && q.outcome !== 'withdrawn',
+    );
     if (accepted) trackedQuestId = accepted.id;
     else if (d.choice === 'vault:survey' && sourceId) {
       const survey = game.quests.find(
-        (q) => q.id === sourceId.replace(/:notice$/, ':survey') && !q.complete,
+        (q) =>
+          q.id === sourceId.replace(/:notice$/, ':survey') &&
+          !q.complete &&
+          q.outcome !== 'withdrawn',
       );
       if (survey) trackedQuestId = survey.id;
     }
@@ -3858,12 +4209,12 @@ addEventListener('keydown', (e) => {
   if (e.defaultPrevented) return;
   if (
     e.key === 'Tab' &&
-    (modal || transferStarted || game.dialogue || root.classList.contains('satchel-open'))
+    (modal || narrative.active || game.dialogue || root.classList.contains('satchel-open'))
   ) {
     const focus = [
       ...(root.classList.contains('satchel-open') && !modal
         ? document.querySelector<HTMLElement>('.s-sidebar')!
-        : el(transferStarted ? 's-transfer' : modal ? 's-modal' : 's-dialogue')
+        : el(narrative.active ? 's-transfer' : modal ? 's-modal' : 's-dialogue')
       ).querySelectorAll<HTMLElement>(
         'button:not(:disabled),input:not(:disabled):not([hidden]),select:not(:disabled),textarea:not(:disabled),a[href],summary,[tabindex="0"]',
       ),
@@ -3890,11 +4241,11 @@ addEventListener('keydown', (e) => {
     (e.target as HTMLElement).closest('button,a,summary,[role=button]')
   )
     return;
-  if (transferStarted) {
+  if (narrative.active) {
     if (k === 'enter' && (e.target as HTMLElement).closest('button')) return;
     if (['escape', 'enter', 'arrowright', 'arrowleft'].includes(k)) {
       e.preventDefault();
-      if (k === 'escape' || transferKind !== 'opening') endTransfer();
+      if (k === 'escape' || narrative.active?.kind !== 'opening') endTransfer();
       else turnIntro(k === 'arrowleft' ? -1 : 1);
     }
     return;
@@ -4030,7 +4381,7 @@ addEventListener('blur', () => {
   experience.suspend();
   keys.clear();
   walk = [];
-  if (started && !paused && !transferStarted) pauseMenu();
+  if (started && !paused && !narrative.active) pauseMenu();
 });
 document.addEventListener('visibilitychange', () => {
   if (document.hidden) {
@@ -4039,7 +4390,7 @@ document.addEventListener('visibilitychange', () => {
     keys.clear();
     walk = [];
     save();
-    if (started && !paused && !transferStarted) pauseMenu();
+    if (started && !paused && !narrative.active) pauseMenu();
   }
 });
 addEventListener('beforeunload', save);
@@ -4144,7 +4495,7 @@ function frame(now: number) {
       crowd: game.npcs.filter((n) => n.hp > 0 && n.id !== game.occupiedNpcId),
     });
     travelObstructed = false;
-    if (travelInput.doorId && !sharedActionPending) void interactShared(travelInput.doorId, true);
+    if (travelInput.doorId && !foreground.pending) void interactShared(travelInput.doorId, true);
     if (travel.feedback.state === 'arrived' && travelTarget) {
       const target = travelTarget;
       travelTarget = undefined;
@@ -4152,7 +4503,7 @@ function frame(now: number) {
     }
     if (frameProfiler.active)
       frameProfiler.record('navigation', performance.now() - navigationMark);
-    if (!sharedActionPending || combatPending) {
+    if (!foreground.pending || foreground.kind === 'combat') {
       profileMark = frameProfiler.active ? performance.now() : 0;
       const beforeX = game.player.x,
         beforeY = game.player.y;
@@ -4162,10 +4513,6 @@ function frame(now: number) {
         Math.hypot(travelInput.x, travelInput.y) > 0.1 &&
         Math.hypot(game.player.x - beforeX, game.player.y - beforeY) < 0.001;
       if (frameProfiler.active) frameProfiler.record('simulation', performance.now() - profileMark);
-    }
-    if (game.phase !== lastPhase) {
-      lastPhase = game.phase;
-      if (game.phase === 'lost') lost();
     }
     audio.setIntensity(
       game.underworldFrame?.state.enemies.some(
@@ -4184,10 +4531,14 @@ function frame(now: number) {
       breathLast = now;
     }
   }
+  if (game.phase !== lastPhase) {
+    lastPhase = game.phase;
+    if (game.phase === 'lost') lost();
+  }
   profileMark = frameProfiler.active ? performance.now() : 0;
   for (const event of game.drainEvents()) {
-    if (event.kind === 'transfer' && ignoreNextTransfer) {
-      ignoreNextTransfer = false;
+    if (event.kind === 'transfer' && ignoreNextTransfer === game) {
+      ignoreNextTransfer = null;
       continue;
     }
     if (event.text) toast(event.text, event.kind === 'quest' ? 7000 : 4200);
@@ -4209,7 +4560,7 @@ function frame(now: number) {
       )[event.kind];
       if (cue) audio.play(cue);
     }
-    if (event.kind === 'transfer' && !transferStarted) transfer('return');
+    if (event.kind === 'transfer' && !narrative.active) transfer('return');
   }
   if (frameProfiler.active) frameProfiler.record('audio', performance.now() - profileMark);
   profileMark = frameProfiler.active ? performance.now() : 0;
@@ -4246,14 +4597,14 @@ function frame(now: number) {
     reducedMotion: reducedMotion.matches,
     effectIntensity,
     combatCues: game.actionCues,
-    transfer: transferStarted
+    transfer: narrative.active
       ? Math.max(
           0.0001,
           Math.min(
             1,
-            (now - transferStarted) /
+            (now - narrative.active.startedAt) /
               ((reducedMotion.matches ? 2500 : 3100) *
-                (transferKind === 'opening' ? opening.length : 2)),
+                (narrative.active?.kind === 'opening' ? opening.length : 2)),
           ),
         )
       : 0,
@@ -4271,7 +4622,7 @@ function frame(now: number) {
     mapLast = now;
   }
   if (frameProfiler.active) frameProfiler.record('ui', performance.now() - profileMark);
-  if (now - saveLast > 8000 && started && !transferStarted) {
+  if (now - saveLast > 8000 && started && !narrative.active) {
     save();
     saveLast = now;
   }
@@ -4303,12 +4654,31 @@ Object.defineProperty(window, 'stichos', {
         player: game.player,
         phase: game.phase,
         interaction: currentInteraction(),
+        requests: {
+          foreground: foreground.diagnostic,
+          panel: panelRequest.diagnostic,
+          connection: connectionRequest.diagnostic,
+          production: productionRequest.diagnostic,
+          chat: chatRequest.diagnostic,
+        },
+        narrative: narrative.active
+          ? {
+              kind: narrative.active.kind,
+              page: narrative.active.page,
+              replay: narrative.active.replay,
+            }
+          : null,
         time: game.time,
         worldTime: game.worldTime,
         fauna: game.fauna,
         fieldObservations: game.fieldObservations,
         residentActivities: [...game.residentActivities],
         appMode: appMode(),
+        lifeLease: lifeTabStatus(),
+        offline: getOfflineStatus(),
+        enemyNavigation: game.enemyNavigationDiagnostics,
+        activeSupplyJobs: game.activeSupplyJobs,
+        personalHistoryCapacity: game.personalHistoryCapacity,
         viewport: mobileViewport.diagnostics,
         portraitControls: portraitControls.diagnostics,
         touchControls: portraitControls.diagnostics,
@@ -4330,7 +4700,7 @@ Object.defineProperty(window, 'stichos', {
         voice: experience.voice.snapshot,
         paused,
         modal,
-        transfer: !!transferStarted,
+        transfer: !!narrative.active,
         inventory: game.inventory,
         quests: game.quests,
         storyStage: game.storyStage,
@@ -4354,6 +4724,8 @@ Object.defineProperty(window, 'stichos', {
         nextArtifactDesign: game.nextArtifactDesign,
         multiplayer: {
           status: multiplayer.status,
+          durability: multiplayer.durability,
+          credentialStorageError: multiplayer.credentialStorageError,
           room: multiplayer.room,
           peerId: multiplayer.peerId,
           peers: multiplayer.peers,
@@ -4366,7 +4738,7 @@ Object.defineProperty(window, 'stichos', {
                   valid: game.productionPreview(placingProduction, pointer).ok,
                 }
               : undefined,
-          pending: sharedActionPending,
+          pending: foreground.pending,
           network: multiplayer.networkDiagnostic,
         },
         transferReady: game.transferReady,
@@ -4430,19 +4802,26 @@ Object.defineProperty(window, 'stichos', {
 });
 updateUI();
 async function enterBrowserLife() {
-  ownsLifeTab = await claimLifeTab();
+  if (leaseRequest.pending) return;
+  const operation = leaseRequest.start('claim');
+  const result = await operation.run(() => claimLifeTab());
+  if (!operation.current) return;
+  ownsLifeTab = result.status === 'succeeded' && result.value;
   if (ownsLifeTab) {
     title();
     return;
   }
+  const status = lifeTabStatus();
   openModal(
     'life-in-use',
-    `<h2>This mind is already awake.</h2><p>Verso is open in another tab of this browser. Close that tab to continue the same life here.</p><button id="v-retry-life-tab" class="s-primary">Continue here</button>`,
+    `<h2>${status.state === 'busy' ? 'This mind is already awake.' : 'This life needs a reserved tab.'}</h2><p>${esc(status.message ?? 'The life could not be reserved. Please try again.')}</p><button id="v-retry-life-tab" class="s-primary">Try again</button>`,
   );
   el('v-retry-life-tab').onclick = () => void enterBrowserLife();
 }
 void enterBrowserLife();
 addEventListener('pagehide', () => {
+  leaseRequest.cancel();
+  panelRequest.cancel();
   experience.suspend();
   voiceUi.release();
   save();

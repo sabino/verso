@@ -60,6 +60,47 @@ function apply(g: Stichos, f: SharedCombatFrame, id = 'one') {
   return g.applySharedCombat(f, id);
 }
 
+test('basic action readiness excludes paid preparation consistently in solo, preview and authority', () => {
+  const local = new Stichos(3886);
+  Object.assign(local.player, { x: 0, y: 30, heading: 0 });
+  const id = local.techniques[0].id;
+  assert.equal(local.technique(id).ok, true);
+  const stamina = local.player.stamina;
+  for (const kind of ['attack', 'ward'] as const) {
+    assert.equal(local.basicActionReadiness(kind).reason, 'preparing');
+    local[kind]();
+    assert.equal(local.player.stamina, stamina);
+  }
+  const g = game();
+  const authority = new SharedCombat(
+    {
+      generation: 3,
+      blocked: () => false,
+      propsAround: () => [],
+      npcsAround: () => [],
+    },
+    new Set(),
+  );
+  apply(g, authority.tick(0.01, [peer(g)]));
+  assert.equal(authority.technique(peer(g), 0, id).ok, true);
+  assert.equal(g.commitTechnique(id, 0, g.bodyId).ok, true);
+  for (const kind of ['attack', 'ward'] as const) {
+    assert.equal(g.basicActionReadiness(kind).reason, 'preparing');
+    assert.equal(g.sharedCombatPreview(kind).ok, false);
+    assert.equal(authority.attack(peer(g), 0, kind).ok, false);
+  }
+  for (let n = 0; n < 8; n++) {
+    g.update(0.1, idle);
+    local.update(0.1, idle);
+    authority.tick(0.1, [peer(g)]);
+  }
+  assert.equal(g.preparingTechnique, undefined);
+  assert.equal(local.preparingTechnique, undefined);
+  assert.equal(g.sharedCombatPreview('attack').ok, true);
+  assert.equal(local.basicActionReadiness('attack').ok, true);
+  assert.equal(authority.attack(peer(g), 0).ok, true);
+});
+
 test('actual authority damage is the only shared damage and acknowledged actions spend once', () => {
   const g = game(),
     other = game(),

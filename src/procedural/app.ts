@@ -1,6 +1,8 @@
 import './style.css';
 import { Crossing, distance } from './session';
-import type { Actor } from './session';
+import type { Actor, CrossingAction } from './session';
+import { CrossingSaveSlot, screenTransition } from './lifecycle';
+import type { ScreenState, ScreenEvent } from './lifecycle';
 import { tileAt } from './world';
 import { sampleMotion } from './motion';
 import { drawSpecies, drawWeapon } from './draw';
@@ -21,15 +23,13 @@ app.innerHTML = `<main class="p-shell"><canvas id="p-world" aria-label="A genera
 <nav class="p-controls"><button data-command="attack"><kbd>F / LMB</kbd><span>Use weapon</span></button><button data-command="jump"><kbd>Space</kbd><span>Jump</span></button><button data-command="interact"><kbd>E</kbd><span>Read / interact</span></button><button data-command="heal"><kbd>Q</kbd><span>Mend</span></button></nav>
 <div id="p-prompt" class="p-prompt"></div><div id="p-message" class="p-message" role="status" aria-live="polite"></div>
 <div class="p-movement"><button data-move="w" aria-label="Move up">↑</button><button data-move="a" aria-label="Move left">←</button><button data-move="s" aria-label="Move down">↓</button><button data-move="d" aria-label="Move right">→</button></div>
-<div id="p-modal" class="p-modal"></div></main>`;
+<div id="p-save-state" class="p-save-state" role="status" aria-live="polite"></div><div id="p-modal" class="p-modal"></div></main>`;
 const el = <T extends HTMLElement = HTMLElement>(id: string) => document.getElementById(id) as T;
 const canvas = el<HTMLCanvasElement>('p-world'),
   ctx = canvas.getContext('2d', { alpha: false })!;
 const audio = new AudioDirector();
 let run = new Crossing(0x71a3),
   name = 'Traveler',
-  paused = true,
-  journal = false,
   started = false,
   muted = false;
 let width = innerWidth,
@@ -51,10 +51,35 @@ const escape = (s: string) =>
     (c) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' })[c]!,
   );
 const saveKey = 'verso.procedural.v1';
-let stored: string | null = null;
-try {
-  stored = localStorage.getItem(saveKey);
-} catch {}
+const saveSlot = new CrossingSaveSlot(
+  {
+    getItem: (key) => localStorage.getItem(key),
+    setItem: (key, value) => localStorage.setItem(key, value),
+  },
+  saveKey,
+);
+let screenState: ScreenState = { screen: 'title', journalReturn: null };
+const isPaused = () => screenState.screen !== 'world';
+function navigate(event: ScreenEvent) {
+  const next = screenTransition(screenState, event, run.phase);
+  if (next === screenState) return;
+  screenState = next;
+  el('p-modal').dataset.screen = next.screen;
+  if (next.screen === 'world') close();
+  else if (next.screen === 'title') title();
+  else if (next.screen === 'briefing') brief();
+  else if (next.screen === 'pause') pauseMenu();
+  else if (next.screen === 'journal') showJournal();
+  else phasePanel();
+  update();
+}
+function saveFeedback() {
+  for (const node of document.querySelectorAll<HTMLElement>('[data-save-feedback],#p-save-state')) {
+    node.textContent = saveSlot.status.message;
+    node.classList.toggle('is-error', saveSlot.status.kind === 'error');
+  }
+}
+
 function resize() {
   width = innerWidth;
   height = innerHeight;
@@ -335,9 +360,15 @@ function save() {
         following: a.following,
       })),
     });
-    localStorage.setItem(saveKey, snapshot);
-    stored = snapshot;
-  } catch {}
+    saveSlot.write(snapshot);
+  } catch {
+    saveSlot.status = {
+      kind: 'error',
+      operation: 'write',
+      message: 'Changes could not be prepared for saving. Keep this page open and retry.',
+    };
+  }
+  saveFeedback();
 }
 function applyWorld(next: Crossing) {
   run = next;
@@ -347,7 +378,6 @@ function applyWorld(next: Crossing) {
   update();
 }
 function open(html: string) {
-  paused = true;
   keys.clear();
   mouse.down = false;
   audio.pause(true);
@@ -355,7 +385,22 @@ function open(html: string) {
     .querySelectorAll<HTMLElement>('.p-shell > :not(#p-modal)')
     .forEach((node) => (node.inert = true));
   el('p-modal').innerHTML =
-    `<section class="p-terminal" role="dialog" aria-modal="true">${html}</section>`;
+    `<section class="p-terminal" role="dialog" aria-modal="true">${html}<p data-save-feedback class="p-save-feedback" role="status" aria-live="polite"></p>${saveSlot.status.kind === 'error' ? `<button id="p-retry-save">${saveSlot.status.operation === 'restore' ? 'Retry restore' : 'Retry storage'}</button>` : ''}</section>`;
+  saveFeedback();
+  const retry = document.getElementById('p-retry-save');
+  if (retry)
+    retry.onclick = () => {
+      if (started && saveSlot.status.kind === 'error' && saveSlot.status.operation === 'write')
+        save();
+      else {
+        if (saveSlot.read() && saveSlot.value && !started) {
+          continueCrossing();
+          return;
+        }
+        if (screenState.screen === 'title') title();
+      }
+      saveFeedback();
+    };
   el('p-modal').classList.add('open');
   const heading = el('p-modal').querySelector('h2');
   if (heading) {
@@ -366,8 +411,6 @@ function open(html: string) {
   el('p-modal').scrollTop = 0;
 }
 function close() {
-  paused = false;
-  journal = false;
   el('p-modal').classList.remove('open');
   el('p-modal').innerHTML = '';
   document
@@ -378,7 +421,7 @@ function close() {
 }
 function title() {
   open(
-    `<span class="p-eyebrow">VERSO / Possible lives</span><h2>A world begins.<br>Someone else lives it.</h2><p>Enter a generated crossing. The terrain, native anatomy, movement and issued equipment follow its seed.</p><form id="p-start"><label>Your name<input id="p-name" value="${escape(name)}" maxlength="22" required></label><label>World seed<input id="p-root" value="0x71A3" maxlength="64" required></label><button class="primary">Enter a possible world ↗</button></form>${stored ? '<button id="p-continue">Continue your crossing</button>' : ''}<a class="p-study" href="?study=1">Open the earlier visual study</a>`,
+    `<span class="p-eyebrow">VERSO / Possible lives</span><h2>A world begins.<br>Someone else lives it.</h2><p>Enter a generated crossing. The terrain, native anatomy, movement and issued equipment follow its seed.</p><form id="p-start"><label>Your name<input id="p-name" value="${escape(name)}" maxlength="22" required></label><label>World seed<input id="p-root" value="0x71A3" maxlength="64" required></label><button class="primary">Enter a possible world ↗</button></form>${started || saveSlot.value ? '<button id="p-continue">Continue your crossing</button>' : ''}<a class="p-study" href="?study=1">Open the earlier visual study</a>`,
   );
   el<HTMLFormElement>('p-start').onsubmit = (e) => {
     e.preventDefault();
@@ -386,101 +429,100 @@ function title() {
     applyWorld(new Crossing(parseSeed(el<HTMLInputElement>('p-root').value)));
     started = true;
     void audio.start(run.world.seed);
-    brief();
+    navigate('prepare');
   };
-  if (stored)
-    el('p-continue').onclick = () => {
-      try {
-        const s = JSON.parse(stored!);
-        if (
-          s.version !== 1 ||
-          !Number.isInteger(s.seed) ||
-          !Number.isInteger(s.crossing) ||
-          s.crossing < 0 ||
-          s.crossing > 10000
-        )
-          throw new Error('Invalid crossing');
-        const next = new Crossing(s.seed, s.crossing, s.rootSeed);
-        next.restoreVessel(s.vessel ?? 0);
-        if (!Array.isArray(s.actors) || s.actors.length !== next.actors.length)
-          throw new Error('Invalid lifeforms');
-        for (const actor of next.actors) {
-          const old = s.actors.find((a: { id: string }) => a.id === actor.id);
-          if (!old || !Number.isFinite(old.hp)) throw new Error('Invalid lifeform');
-          actor.hp = clamp(old.hp, 0, actor.maxHp);
-          actor.scanned = !!old.scanned;
-          actor.following = !!old.following;
-          if (old.position && tileAt(next.world, old.position.x, old.position.z))
-            actor.position = {
-              ...old.position,
-              y: tileAt(next.world, old.position.x, old.position.z)!.height,
-            };
-        }
-        next.scanned = next.actors.filter((a) => a.scanned).map((a) => a.genome.id);
-        next.integrity = clamp(Number(s.integrity) || 0, 0, 100);
-        next.attunement = clamp(Number(s.attunement) || 0, 0, 1);
-        next.memories = clamp(Number(s.memories) || 0, 0, 999);
-        next.actionSeed = s.actionSeed >>> 0;
-        next.kills = clamp(Number(s.kills) || 0, 0, 999);
-        if (!s.player || !Number.isFinite(s.player.hp)) throw new Error('Invalid host');
-        next.player.hp = clamp(s.player.hp, 0, next.player.maxHp);
-        const position = s.player.position;
-        if (position && Number.isFinite(position.x) && Number.isFinite(position.z)) {
-          const ground = tileAt(next.world, position.x, position.z);
-          if (ground) next.player.position = { x: position.x, y: ground.height, z: position.z };
-        }
-        if (s.belongings && Number.isFinite(s.belongings.x) && Number.isFinite(s.belongings.z)) {
-          const ground = tileAt(next.world, s.belongings.x, s.belongings.z);
-          if (ground) {
-            next.belongings = { x: s.belongings.x, y: ground.height, z: s.belongings.z };
-            next.belongingsAmount = clamp(Number(s.belongingsAmount) || 0, 0, 999);
-          }
-        }
-        if (s.phase === 'dead' || next.player.hp <= 0) next.phase = 'dead';
-        else if (s.phase === 'complete' && next.ready) next.phase = 'complete';
-        name = String(s.name).slice(0, 22);
-        applyWorld(next);
-        started = true;
-        void audio.start(run.world.seed);
-        close();
-        if (run.phase !== 'playing') phasePanel();
-      } catch {
-        stored = null;
-        title();
-        run.message = 'That crossing could not be restored.';
+  if (started || saveSlot.value) el('p-continue').onclick = continueCrossing;
+}
+function continueCrossing() {
+  if (started) {
+    navigate('continue');
+    return;
+  }
+  try {
+    const s = JSON.parse(saveSlot.value!);
+    if (
+      s.version !== 1 ||
+      !Number.isInteger(s.seed) ||
+      !Number.isInteger(s.crossing) ||
+      s.crossing < 0 ||
+      s.crossing > 10000
+    )
+      throw new Error('Invalid crossing');
+    const next = new Crossing(s.seed, s.crossing, s.rootSeed);
+    next.restoreVessel(s.vessel ?? 0);
+    if (!Array.isArray(s.actors) || s.actors.length !== next.actors.length)
+      throw new Error('Invalid lifeforms');
+    for (const actor of next.actors) {
+      const old = s.actors.find((a: { id: string }) => a.id === actor.id);
+      if (!old || !Number.isFinite(old.hp)) throw new Error('Invalid lifeform');
+      actor.hp = clamp(old.hp, 0, actor.maxHp);
+      actor.scanned = !!old.scanned;
+      actor.following = !!old.following;
+      if (old.position && tileAt(next.world, old.position.x, old.position.z))
+        actor.position = {
+          ...old.position,
+          y: tileAt(next.world, old.position.x, old.position.z)!.height,
+        };
+    }
+    next.scanned = next.actors.filter((a) => a.scanned).map((a) => a.genome.id);
+    next.integrity = clamp(Number(s.integrity) || 0, 0, 100);
+    next.attunement = clamp(Number(s.attunement) || 0, 0, 1);
+    next.memories = clamp(Number(s.memories) || 0, 0, 999);
+    next.actionSeed = s.actionSeed >>> 0;
+    next.kills = clamp(Number(s.kills) || 0, 0, 999);
+    if (!s.player || !Number.isFinite(s.player.hp)) throw new Error('Invalid host');
+    next.player.hp = clamp(s.player.hp, 0, next.player.maxHp);
+    const position = s.player.position;
+    if (position && Number.isFinite(position.x) && Number.isFinite(position.z)) {
+      const ground = tileAt(next.world, position.x, position.z);
+      if (ground) next.player.position = { x: position.x, y: ground.height, z: position.z };
+    }
+    if (s.belongings && Number.isFinite(s.belongings.x) && Number.isFinite(s.belongings.z)) {
+      const ground = tileAt(next.world, s.belongings.x, s.belongings.z);
+      if (ground) {
+        next.belongings = { x: s.belongings.x, y: ground.height, z: s.belongings.z };
+        next.belongingsAmount = clamp(Number(s.belongingsAmount) || 0, 0, 999);
       }
-    };
+    }
+    if (s.phase === 'dead' || next.player.hp <= 0) next.phase = 'dead';
+    else if (s.phase === 'complete' && next.ready) next.phase = 'complete';
+    name = String(s.name).slice(0, 22);
+    applyWorld(next);
+    saveSlot.restoreSucceeded();
+    started = true;
+    void audio.start(run.world.seed);
+    navigate('continue');
+  } catch {
+    saveSlot.restoreFailed();
+    title();
+  }
 }
 function brief() {
   open(
     `<span class="p-eyebrow">Assignment ${run.crossing + 1} / ${escape(run.world.name)}</span><h2>${escape(run.world.mission.title)}</h2><p>${escape(run.world.mission.reason)}</p><div class="p-brief-data"><div><small>Borrowed anatomy</small><strong>${escape(run.player.genome.name)}</strong><span>${run.player.genome.locomotion} · ${run.player.genome.nodes.length} segments · ${run.player.genome.appendages.filter((a) => a.kind === 'leg').length} legs</span></div><div><small>Issued object</small><strong>${escape(run.world.weapon.name)}</strong><span>${run.world.weapon.core} / ${run.world.weapon.trigger}</span></div></div><p>${escape(run.world.mission.condition)}</p><button class="primary" id="p-deploy">Inhabit this body ↗</button><small class="p-note">WASD move · Shift run · Space jump · E interact · F use weapon</small>`,
   );
   el('p-deploy').onclick = () => {
-    close();
+    navigate('deploy');
     save();
   };
 }
 function showJournal() {
-  journal = true;
   const s = run.player.genome,
     w = run.world.weapon;
   open(
-    `<span class="p-eyebrow">Personal field record / ${escape(name)}</span><h2>Forms have consequences.</h2><p>${escape(s.explanation)}</p><div class="p-record-grid"><div><h3>Your anatomy</h3><p>${s.nodes.length} body segments · ${s.appendages.length} appendages<br>${s.locomotion} · ${s.role}<br>Mass ${s.mass.toFixed(2)} · speed ${s.speed.toFixed(2)}<br>Jump impulse ${s.jump.toFixed(2)}</p><p>${s.capabilities.map(escape).join(' · ')}</p><h3>Issued object</h3><p>${escape(w.explanation)}</p><p>Damage ${w.damage.toFixed(1)} · reach ${w.reach.toFixed(1)}<br>Recovery ${w.recovery.toFixed(2)}s</p></div><div><h3>Native lineages</h3>${run.actors.map((a) => `<article><strong>${a.scanned ? escape(a.genome.name) : 'Uncataloged lifeform'}</strong><small>${a.scanned ? `${a.genome.role} / ${a.genome.locomotion} / ${a.genome.nodes.length} segments` : 'Approach and read its anatomy.'}</small></article>`).join('')}</div></div><p class="p-note">The same seed and generator version reproduce these descriptors. Your actions feed the next crossing.</p><button id="p-return" class="primary">Return to the world</button>`,
+    `<span class="p-eyebrow">Personal field record / ${escape(name)}</span><h2>Forms have consequences.</h2><p>${escape(s.explanation)}</p><div class="p-record-grid"><div><h3>Your anatomy</h3><p>${s.nodes.length} body segments · ${s.appendages.length} appendages<br>${s.locomotion} · ${s.role}<br>Mass ${s.mass.toFixed(2)} · speed ${s.speed.toFixed(2)}<br>Jump impulse ${s.jump.toFixed(2)}</p><p>${s.capabilities.map(escape).join(' · ')}</p><h3>Issued object</h3><p>${escape(w.explanation)}</p><p>Damage ${w.damage.toFixed(1)} · reach ${w.reach.toFixed(1)}<br>Recovery ${w.recovery.toFixed(2)}s</p></div><div><h3>Native lineages</h3>${run.actors.map((a) => `<article><strong>${a.scanned ? escape(a.genome.name) : 'Uncataloged lifeform'}</strong><small>${a.scanned ? `${a.genome.role} / ${a.genome.locomotion} / ${a.genome.nodes.length} segments` : 'Approach and read its anatomy.'}</small></article>`).join('')}</div></div><p class="p-note">The same seed and generator version reproduce these descriptors. Your actions feed the next crossing.</p><button id="p-return" class="primary">Return to ${screenState.journalReturn === 'pause' ? 'pause menu' : run.phase === 'playing' ? 'the world' : 'assignment'}</button>`,
   );
-  el('p-return').onclick = () => {
-    if (run.phase === 'playing') close();
-    else phasePanel();
-  };
+  el('p-return').onclick = () => navigate('back');
 }
 function pauseMenu() {
   open(
     `<span class="p-eyebrow">Link on hold</span><h2>Between possible worlds.</h2><button id="p-resume" class="primary">Return to this body</button><button id="p-record">Read the field record</button><button id="p-new">Start from another seed</button><a class="p-study" href="?study=1">Earlier visual study</a>`,
   );
-  el('p-resume').onclick = close;
-  el('p-record').onclick = showJournal;
+  el('p-resume').onclick = () => navigate('back');
+  el('p-record').onclick = () => navigate('journal');
   el('p-new').onclick = () => {
     save();
-    title();
+    navigate('title');
   };
 }
 function phasePanel() {
@@ -490,20 +532,23 @@ function phasePanel() {
       `<span class="p-eyebrow">Vessel lost</span><h2>Another form.<br>The same unfinished task.</h2><p>A new body is generated for the next host. Its movement and capabilities may differ.</p><button id="p-rebody" class="primary">Borrow another life</button>`,
     );
     el('p-rebody').onclick = () => {
-      run.reincarnate();
+      if (!run.reincarnate()) return;
       lastPhase = run.phase;
       camera = { ...run.player.position };
-      close();
+      navigate('recovered');
+      save();
     };
   } else if (run.phase === 'complete') {
     open(
       `<span class="p-eyebrow">Assignment returned</span><h2>${Math.round(run.integrity)}% of this world remains.</h2><p>${run.kills} lives ended. ${run.scanned.length} lineages cataloged. Your action history has become part of the next seed.</p><button id="p-next" class="primary">Cross into another possibility ↗</button><button id="p-review">Review your field record</button>`,
     );
     el('p-next').onclick = () => {
-      applyWorld(run.next());
-      brief();
+      const next = run.next();
+      if (!next) return;
+      applyWorld(next);
+      navigate('prepare');
     };
-    el('p-review').onclick = showJournal;
+    el('p-review').onclick = () => navigate('journal');
   }
 }
 function update() {
@@ -548,8 +593,19 @@ function update() {
   wc.clearRect(0, 0, 88, 88);
   drawWeapon(wc, w.weapon, 44, 44, 80);
   el('p-message').textContent = run.message;
+  saveFeedback();
+  for (const button of document.querySelectorAll<HTMLButtonElement>('[data-command]')) {
+    const availability = run.actionAvailability(button.dataset.command as CrossingAction);
+    const reason = isPaused() ? 'Return to the world to act.' : availability.message;
+    button.disabled = isPaused() || !availability.allowed;
+    button.setAttribute('aria-disabled', String(button.disabled));
+    button.dataset.blockedReason = isPaused() ? 'screen' : (availability.reason ?? '');
+    button.setAttribute('aria-description', reason ?? 'Ready');
+    button.title = reason ?? 'Ready';
+  }
+
   const near = run.nearby;
-  el('p-prompt').textContent = paused
+  el('p-prompt').textContent = isPaused()
     ? ''
     : distance(p.position, w.gate) < 1.6 && run.ready
       ? 'E · Return through the rift'
@@ -582,21 +638,18 @@ function update() {
   );
 }
 function command(kind: string) {
-  if (paused) return;
+  if (isPaused() || document.hidden) return;
   if (kind === 'attack') {
-    run.attack();
-    audio.play('pulse');
+    if (run.attack()) audio.play('pulse');
   } else if (kind === 'jump') run.jump();
   else if (kind === 'interact') {
-    run.interact();
-    audio.play('scan');
+    if (run.interact()) audio.play('scan');
   } else if (kind === 'heal') {
-    run.heal();
-    audio.play('heal');
+    if (run.heal()) audio.play('heal');
   }
   if (run.phase !== lastPhase) {
     lastPhase = run.phase;
-    phasePanel();
+    navigate('phase');
   }
   update();
 }
@@ -605,14 +658,15 @@ document
   .forEach((b) => (b.onclick = () => command(b.dataset.command!)));
 document.querySelectorAll<HTMLElement>('[data-move]').forEach((b) => {
   b.onpointerdown = (e) => {
+    if (isPaused() || document.hidden) return;
     e.preventDefault();
     b.setPointerCapture(e.pointerId);
     keys.add(b.dataset.move!);
   };
-  b.onpointerup = b.onpointercancel = () => keys.delete(b.dataset.move!);
+  b.onpointerup = b.onpointercancel = b.onlostpointercapture = () => keys.delete(b.dataset.move!);
 });
-el('p-journal').onclick = showJournal;
-el('p-pause').onclick = pauseMenu;
+el('p-journal').onclick = () => navigate('journal');
+el('p-pause').onclick = () => navigate('pause');
 el('p-sound').onclick = () => {
   if (audio.needsGesture && !muted) {
     void audio.start(run.world.seed);
@@ -623,7 +677,7 @@ el('p-sound').onclick = () => {
   el('p-sound').textContent = muted ? '×' : '♪';
 };
 addEventListener('keydown', (e) => {
-  if (e.key === 'Tab' && paused) {
+  if (e.key === 'Tab' && isPaused()) {
     const controls = Array.from(
       el('p-modal').querySelectorAll<HTMLElement>('button,input,a'),
     ).filter((node) => node.getClientRects().length > 0);
@@ -638,20 +692,22 @@ addEventListener('keydown', (e) => {
     }
     return;
   }
-  if ((e.target as HTMLElement).tagName === 'INPUT') return;
+  const target = e.target as HTMLElement;
+  if (target.matches('input,textarea,select,[contenteditable="true"]')) return;
+  if (target.matches('button,a,summary') && (e.key === ' ' || e.key === 'Enter')) return;
   const key = e.key.toLowerCase();
   if ([' ', 'arrowup', 'arrowdown', 'arrowleft', 'arrowright'].includes(key)) e.preventDefault();
   if (key === 'escape') {
-    if (paused && started && run.phase === 'playing') close();
-    else if (!paused) pauseMenu();
+    e.preventDefault();
+    navigate('back');
     return;
   }
   if (key === 'j' && started) {
-    if (journal && run.phase === 'playing') close();
-    else showJournal();
+    if (screenState.screen === 'journal') navigate('back');
+    else navigate('journal');
     return;
   }
-  if (paused) return;
+  if (isPaused() || document.hidden) return;
   if (!keys.has(key)) run.record(`down:${key}`);
   keys.add(key);
   if (!e.repeat) {
@@ -670,7 +726,7 @@ canvas.onpointermove = (e) => {
   mouse.known = true;
 };
 canvas.onpointerdown = (e) => {
-  if (paused) return;
+  if (isPaused() || document.hidden) return;
   if (audio.needsGesture) void audio.start(run.world.seed);
   mouse.x = e.clientX;
   mouse.y = e.clientY;
@@ -687,7 +743,7 @@ canvas.onwheel = (e) => {
 addEventListener('blur', () => {
   keys.clear();
   mouse.down = false;
-  if (started && !paused) pauseMenu();
+  if (started && !isPaused()) navigate('pause');
 });
 addEventListener('beforeunload', save);
 document.addEventListener('visibilitychange', () => {
@@ -695,7 +751,7 @@ document.addEventListener('visibilitychange', () => {
     save();
     keys.clear();
     mouse.down = false;
-    if (started && !paused) pauseMenu();
+    if (started && !isPaused()) navigate('pause');
   }
 });
 function frame(now: number) {
@@ -709,7 +765,7 @@ function frame(now: number) {
     frames = 0;
     frameSeconds = 0;
   }
-  if (!paused) {
+  if (!isPaused() && !document.hidden) {
     const sx =
         Number(keys.has('d') || keys.has('arrowright')) -
         Number(keys.has('a') || keys.has('arrowleft')),
@@ -728,10 +784,10 @@ function frame(now: number) {
         ? Math.atan2(z, x)
         : run.player.heading;
     run.update(dt, { x, z, run: keys.has('shift'), aim });
-    if (mouse.down || keys.has('f')) run.attack();
+    if ((mouse.down || keys.has('f')) && run.actionAvailability('attack').allowed) run.attack();
     if (run.phase !== lastPhase) {
       lastPhase = run.phase;
-      phasePanel();
+      navigate('phase');
     }
     if (now - lastSave > 5000) {
       save();
@@ -762,7 +818,17 @@ Object.defineProperty(window, 'versoProcedural', {
         weapon: run.world.weapon,
         scanned: run.scanned,
         ready: run.ready,
-        paused,
+        paused: isPaused(),
+        screen: screenState.screen,
+        started,
+        memories: run.memories,
+        save: saveSlot.status,
+        actions: Object.fromEntries(
+          (['attack', 'jump', 'interact', 'heal'] as CrossingAction[]).map((action) => [
+            action,
+            run.actionAvailability(action),
+          ]),
+        ),
       });
     },
     get world() {
@@ -776,5 +842,5 @@ Object.defineProperty(window, 'versoProcedural', {
   writable: false,
 });
 update();
-title();
+navigate('title');
 requestAnimationFrame(frame);

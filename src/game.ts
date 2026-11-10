@@ -1,6 +1,29 @@
 /** The deterministic, renderer-independent simulation for Verso. */
 export type Vec2 = { x: number; y: number };
 export type ActionKind = 'blade' | 'pulse' | 'dash' | 'scan' | 'mend';
+export type ActionBlock =
+  | 'phase'
+  | 'cooldown'
+  | 'energy'
+  | 'no-fragments'
+  | 'whole'
+  | 'no-target'
+  | 'already-active'
+  | 'mission-incomplete';
+export type ActionAvailability =
+  | { allowed: true; reason: null; message: null }
+  | { allowed: false; reason: ActionBlock; message: string };
+const allowedAction: ActionAvailability = Object.freeze({
+  allowed: true,
+  reason: null,
+  message: null,
+});
+const blockedAction = (reason: ActionBlock, message: string): ActionAvailability => ({
+  allowed: false,
+  reason,
+  message,
+});
+const actionCosts = { blade: 8, pulse: 14, dash: 28 };
 export type InputState = { x: number; y: number; running: boolean; aim: Vec2 };
 export type GamePhase = 'playing' | 'dead' | 'complete' | 'reveal';
 export type EntityKind = 'species' | 'enemy' | 'relay' | 'survivor' | 'drop' | 'portal';
@@ -654,20 +677,79 @@ export class Game {
     }
   }
 
+  /** Side-effect-free readiness, also used by the actual command guards. */
+  actionAvailability(kind: ActionKind): ActionAvailability {
+    const s = this.state,
+      p = s.player;
+    if (s.phase !== 'playing')
+      return blockedAction(
+        'phase',
+        s.phase === 'dead'
+          ? 'Borrow another body before acting.'
+          : 'Continue to the next assignment before acting.',
+      );
+    if (!(kind in p.cooldowns)) return blockedAction('no-target', 'Unknown action.');
+    if (p.cooldowns[kind] > 0) return blockedAction('cooldown', 'This ability is recovering.');
+    if (kind === 'scan')
+      return this.nearest((entity) => entity.kind === 'species' && !entity.scanned, 128)
+        ? allowedAction
+        : blockedAction('no-target', 'Move closer to an uncataloged lifeform.');
+    if (kind === 'mend') {
+      if (p.fragments < 1)
+        return blockedAction('no-fragments', 'A memory shard is needed to mend this body.');
+      if (p.hp >= p.maxHp && s.integrity >= 100)
+        return blockedAction('whole', 'Body and world are already whole.');
+      return allowedAction;
+    }
+    return p.stamina >= actionCosts[kind]
+      ? allowedAction
+      : blockedAction('energy', 'Connection energy low. Ease your pace.');
+  }
+
+  interactionAvailability(): ActionAvailability {
+    if (this.state.phase !== 'playing')
+      return blockedAction('phase', 'Return to a living assignment before interacting.');
+    const entity = this.interactable();
+    if (!entity) return blockedAction('no-target', 'Nothing within reach. Explore the island.');
+    if (entity.kind === 'species') return this.actionAvailability('scan');
+    if (entity.kind === 'relay' && entity.active)
+      return blockedAction(
+        'already-active',
+        `${entity.name} already aligned. Follow the numbered sequence.`,
+      );
+    if (entity.kind === 'survivor' && entity.state === 'following')
+      return blockedAction('already-active', 'Stay close. Lead the archivist back to the gate.');
+    if (entity.kind === 'portal' && !this.missionReady())
+      return blockedAction(
+        'mission-incomplete',
+        this.state.mission % 3 === 2
+          ? 'Bring the archivist safely to the gate first.'
+          : 'Finish the assignment before returning.',
+      );
+    return allowedAction;
+  }
+
+  /** E and the Scan control prefer a nearby contextual interaction over scanning. */
+  controlAvailability(kind: ActionKind): ActionAvailability {
+    return kind === 'scan' && this.getInteraction()
+      ? this.interactionAvailability()
+      : this.actionAvailability(kind);
+  }
+
   action(kind: ActionKind, target?: Vec2): boolean {
     const s = this.state,
       p = s.player;
-    if (s.phase !== 'playing' || !(kind in p.cooldowns) || p.cooldowns[kind] > 0) return false;
+    const availability = this.actionAvailability(kind);
+    if (!availability.allowed) {
+      if (availability.reason !== 'cooldown' && availability.reason !== 'phase')
+        this.message(availability.message);
+      return false;
+    }
     if (target && finite(target.x) && finite(target.y) && distance(target, p) > 1)
       p.facing = direction(p, target);
     if (kind === 'scan') return this.scan();
     if (kind === 'mend') return this.mend();
-    const costs = { blade: 8, pulse: 14, dash: 28 };
-    if (p.stamina < costs[kind]) {
-      this.message('Connection energy low. Ease your pace.');
-      return false;
-    }
-    p.stamina -= costs[kind];
+    p.stamina -= actionCosts[kind];
     if (kind === 'dash') {
       p.cooldowns.dash = 0.8;
       p.dashing = 0.19;
@@ -782,7 +864,12 @@ export class Game {
   }
 
   interact(): boolean {
-    if (this.state.phase !== 'playing') return false;
+    const availability = this.interactionAvailability();
+    if (!availability.allowed) {
+      if (availability.reason !== 'phase' && availability.reason !== 'cooldown')
+        this.message(availability.message);
+      return false;
+    }
     const entity = this.interactable();
     if (!entity) {
       this.message('Nothing within reach. Explore the island.');

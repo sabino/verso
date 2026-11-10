@@ -1,6 +1,6 @@
 import { deriveSeed } from '../procedural/random.ts';
 import { worldTimeAt } from './world-time.ts';
-import type { ActorAddress } from './actor-ledger.ts';
+import type { ActorAddress, ActorJourneyState } from './actor-ledger.ts';
 import {
   FIELD_ITEMS,
   type FieldBundle,
@@ -12,6 +12,39 @@ import {
 export type EstateKind = 'home' | 'plot';
 export type StationKind = 'sawmill' | 'carpentry' | 'garden' | 'apothecary' | 'store';
 export type WorkerPhase = 'idle' | 'collecting' | 'carrying-input' | 'working' | 'carrying-output';
+export type WorkerPauseReason =
+  | 'none'
+  | 'missing'
+  | 'lease'
+  | 'off-shift'
+  | 'no-job'
+  | 'permission'
+  | 'loyalty'
+  | 'wages'
+  | 'customers'
+  | 'inputs'
+  | 'route-planning'
+  | 'route-unreachable'
+  | 'traveling'
+  | 'storage';
+export interface WorkerRecoveryReadiness {
+  ok: boolean;
+  code:
+    | 'ready'
+    | 'not-owner'
+    | 'lease-expired'
+    | 'worker-unavailable'
+    | 'too-far'
+    | 'permission'
+    | 'not-needed'
+    | 'insufficient-coins'
+    | 'no-failed-route'
+    | 'unsupported';
+  message: string;
+  cost: FieldBundle;
+}
+/** Renewing a broken agreement costs the original signing fee; batch wages remain separate. */
+export const WORKER_RECONCILIATION = Object.freeze({ coins: 4, loyalty: 25, refusalBelow: 15 });
 /** Every offer must be resolved from the authority's actual generated building/parcel, never client data. */
 export interface PropertyOffer extends ActorAddress {
   id: string;
@@ -47,7 +80,13 @@ export interface PropertyAdapters {
   peer(id: string): ActorAddress | undefined;
   cell(address: ActorAddress): PropertyCell;
   /** Actual navigation sets a persistent actor destination; it does not alter position here. */
-  travel(actorId: string, destination: ActorAddress): 'traveling' | 'arrived' | 'unreachable';
+  travel(
+    actorId: string,
+    destination: ActorAddress,
+    options?: { retry?: boolean },
+  ): 'traveling' | 'arrived' | 'unreachable';
+  journey?(actorId: string): { state: ActorJourneyState; destination?: ActorAddress } | undefined;
+  balance?(peerId: string): FieldBundle | undefined;
   /** Server-derived origin candidate only; never accept a submitted legacy save as proof. */
   legacyHome(peerId: string): string | undefined;
   permission(
@@ -260,6 +299,13 @@ export interface EstateWorker {
   status: string;
   unpaidSince?: number;
 }
+/** Additive presentation fields may be absent on older authorities; none belong in a save. */
+export interface EstateWorkerFrame extends EstateWorker {
+  address?: ActorAddress;
+  pauseReason?: WorkerPauseReason;
+  journeyState?: ActorJourneyState;
+  recovery?: { reconcile: WorkerRecoveryReadiness; retry: WorkerRecoveryReadiness };
+}
 export interface PropertySave {
   version: 1;
   seed: number;
@@ -296,6 +342,7 @@ export type PropertyCommand =
   | { kind: 'hire'; propertyId: string; npcId: string }
   | { kind: 'assign'; propertyId: string; npcId: string; stationId: string }
   | { kind: 'unassign'; propertyId: string; npcId: string }
+  | { kind: 'reconcile-worker' | 'retry-worker'; propertyId: string; npcId: string }
   | { kind: 'queue'; propertyId: string; stationId: string; recipe: string; batches: number }
   | { kind: 'cancel-job'; propertyId: string; stationId: string }
   | { kind: 'deposit' | 'withdraw'; propertyId: string; bundle: FieldBundle }
@@ -655,6 +702,8 @@ export class PropertyWorld {
   private state: PropertySave;
   private receipts: Set<string>;
   private workerIndex: Map<string, EstateWorker>;
+  // A presentation of the last simulated gate, never a second saved authority for worker phase.
+  private workerPauses = new Map<string, WorkerPauseReason>();
   private cursor = 0;
   private stationCells = new Map<string, Readonly<StationObstacle>>();
   private estateRoutes = new Map<string, EstateRoutes>();
@@ -726,7 +775,7 @@ export class PropertyWorld {
     );
     return e && clone(e.offer.entrance);
   }
-  frame(peerId: string, at?: ActorAddress) {
+  frame(peerId: string, at?: ActorAddress, now = 0) {
     const estates = this.state.estates
       .filter((e) => e.ownerId === peerId || (at && distance(e.offer, at) < 36))
       .map((e) =>
@@ -752,14 +801,99 @@ export class PropertyWorld {
       estates,
       workers: this.state.workers
         .filter((w) => w.ownerId === peerId)
-        .map((w) => ({
-          ...clone(w),
-          address: this.adapters.person(w.id)
-            ? this.personAddress(this.adapters.person(w.id)!)
-            : undefined,
-        })),
+        .map(
+          (w): EstateWorkerFrame => ({
+            ...clone(w),
+            address: this.adapters.person(w.id)
+              ? this.personAddress(this.adapters.person(w.id)!)
+              : undefined,
+            pauseReason: this.workerPauses.get(w.id),
+            journeyState: this.adapters.journey?.(w.id)?.state,
+            recovery: {
+              reconcile: this.workerRecovery(peerId, w.estateId, w.id, 'reconcile-worker', now),
+              retry: this.workerRecovery(peerId, w.estateId, w.id, 'retry-worker', now),
+            },
+          }),
+        ),
       saturated: this.receipts.size >= PROPERTY_RULES.maxReceipts,
     };
+  }
+  /** Shared, observational action projection. Commands recheck this against current authority. */
+  workerRecovery(
+    peerId: string,
+    estateId: string,
+    npcId: string,
+    kind: 'reconcile-worker' | 'retry-worker',
+    now: number,
+  ): WorkerRecoveryReadiness {
+    const cost = {
+      coins: kind === 'reconcile-worker' ? WORKER_RECONCILIATION.coins : 0,
+      items: {},
+    };
+    const answer = (
+      code: WorkerRecoveryReadiness['code'],
+      message: string,
+    ): WorkerRecoveryReadiness => ({ ok: code === 'ready', code, message, cost });
+    const e = this.state.estates.find((e) => e.id === estateId && e.ownerId === peerId);
+    const w = this.workerIndex.get(npcId);
+    if (!e || !w || w.ownerId !== peerId || w.estateId !== estateId)
+      return answer('not-owner', 'Choose a worker employed at your estate.');
+    if (!this.active(e, now))
+      return answer('lease-expired', 'Renew the lease before recovering estate work.');
+    const p = this.adapters.person(npcId);
+    if (!p?.alive)
+      return answer(
+        'worker-unavailable',
+        'The worker must be alive and available. Their cargo remains reserved.',
+      );
+    if (
+      kind === 'reconcile-worker'
+        ? !this.near(peerId, p)
+        : !this.near(peerId, p) &&
+          !this.near(peerId, e.offer.entrance) &&
+          !this.near(peerId, e.offer)
+    )
+      return answer(
+        'too-far',
+        kind === 'reconcile-worker'
+          ? 'Meet this worker to renew their agreement.'
+          : 'Visit the worker or estate before retrying their route.',
+      );
+    const permission = this.adapters.permission(peerId, 'hire', npcId);
+    if (!permission.ok)
+      return answer(
+        'permission',
+        permission.reason ?? 'Restore this person’s civic trust before resuming employment.',
+      );
+    if (kind === 'reconcile-worker') {
+      if (w.loyalty >= WORKER_RECONCILIATION.refusalBelow)
+        return answer(
+          'not-needed',
+          'This worker’s agreement does not need renewal. Keep batch wages funded.',
+        );
+      const balance = this.adapters.balance?.(peerId);
+      if (balance && balance.coins < cost.coins)
+        return answer(
+          'insufficient-coins',
+          `Carry ${cost.coins} field coins to renew the agreement. Batch wages are separate.`,
+        );
+      return answer(
+        'ready',
+        `Pay ${cost.coins} field coins to restore loyalty to ${WORKER_RECONCILIATION.loyalty}. Existing cargo and batch wages are preserved.`,
+      );
+    }
+    if (!this.adapters.journey)
+      return answer(
+        'unsupported',
+        'This world does not support intentional worker route recovery yet.',
+      );
+    const journey = this.adapters.journey(npcId);
+    if (journey?.state !== 'unreachable' || !journey.destination)
+      return answer('no-failed-route', 'There is no failed journey to retry.');
+    return answer(
+      'ready',
+      'Retry the remembered destination after clearing its route. Cargo and paid wages stay with this worker.',
+    );
   }
   drainEvents(): PropertyEvent[] {
     const events = this.events;
@@ -916,6 +1050,34 @@ export class PropertyWorld {
       anyEstate.leaseUntil = Math.max(now, anyEstate.leaseUntil ?? 0) + PROPERTY_RULES.leaseSeconds;
       anyEstate.revision++;
       return result(true, 'Lease extended. Stored belongings were preserved.');
+    }
+    if (c.kind === 'reconcile-worker' || c.kind === 'retry-worker') {
+      if (!identity(c.npcId)) return result(false, 'Choose a valid worker.');
+      const ready = this.workerRecovery(peerId, c.propertyId, c.npcId, c.kind, now);
+      if (!ready.ok) return result(false, ready.message);
+      const w = this.workerIndex.get(c.npcId)!;
+      if (c.kind === 'reconcile-worker') {
+        const paid = this.bank(peerId, ready.cost, empty(), `estate:${eventId}`);
+        if (!paid.ok) return paid;
+        w.loyalty = WORKER_RECONCILIATION.loyalty;
+        delete w.unpaidSince;
+        this.workerPauses.delete(w.id);
+        w.status = 'Agreement renewed; existing work resumes when its other requirements are met';
+      } else {
+        const destination = this.adapters.journey!(w.id)!.destination!;
+        if (this.adapters.travel(w.id, destination, { retry: true }) === 'unreachable')
+          return result(
+            false,
+            'The remembered route cannot be retried yet. Cargo remains reserved.',
+          );
+        this.invalidateNavigation(w.estateId);
+        this.workerPauses.set(w.id, 'route-planning');
+        w.status = 'Retrying the remembered route; cargo and paid wages preserved';
+      }
+      const station = anyEstate!.stations.find((s) => s.workerId === w.id);
+      if (station) station.status = w.status;
+      anyEstate!.revision++;
+      return result(true, w.status);
     }
     const e = this.owned(peerId, c.propertyId, now);
     if (!e) return result(false, 'An active ownership or rental agreement is required.');
@@ -1270,23 +1432,27 @@ export class PropertyWorld {
     if (!actual) return false;
     if (distance(actual, to) <= 0.85) return true;
     const status = this.adapters.travel(w.id, to);
+    this.workerPauses.set(w.id, status === 'unreachable' ? 'route-unreachable' : 'traveling');
     w.status =
       status === 'unreachable'
-        ? `Unreachable: ${label}. Clear the route or reassign after recovery.`
+        ? `Unreachable: ${label}. Clear the route, then retry this worker’s journey.`
         : `Walking: ${label}`;
     // Even a mistaken 'arrived' adapter result cannot authorize remote production.
     return false;
   }
   private stepWorker(w: EstateWorker, now: number, day: number, dt: number) {
+    this.workerPauses.set(w.id, 'none');
     const e = this.state.estates.find((e) => e.id === w.estateId)!,
       s = e.stations.find((s) => s.id === w.stationId),
       p = this.adapters.person(w.id);
     if (!p || !p.alive) {
+      this.workerPauses.set(w.id, 'missing');
       w.status = 'Worker missing or injured; cargo and identity remain reserved';
       if (s) s.status = w.status;
       return;
     }
     if (!this.active(e, now)) {
+      this.workerPauses.set(w.id, 'lease');
       w.status = 'Lease expired; production paused without losing stock';
       if (s) s.status = w.status;
       return;
@@ -1294,11 +1460,13 @@ export class PropertyWorld {
     const shift = w.nightShift ? day >= 0.72 || day < 0.2 : day >= 0.23 && day < 0.77;
     if (!shift) {
       this.move(w, w.home, 'home for rest');
+      this.workerPauses.set(w.id, 'off-shift');
       w.status = 'Off shift; resting at home';
       if (s) s.status = w.status;
       return;
     }
     if (!s?.job) {
+      this.workerPauses.set(w.id, 'no-job');
       w.phase = 'idle';
       w.status = 'Waiting for a queued job';
       return;
@@ -1307,13 +1475,15 @@ export class PropertyWorld {
     // A refusal pauses the batch; its already-paid wage, reserved stock and cargo remain intact.
     const permission = this.adapters.permission(w.ownerId, 'hire', w.id);
     if (!permission.ok) {
+      this.workerPauses.set(w.id, 'permission');
       w.status = `Work paused: ${(permission.reason ?? 'this worker no longer trusts the agreement; reconcile before resuming').slice(0, 140)}`;
       s.status = w.status;
       return;
     }
     const job = s.job,
       recipe = ESTATE_RECIPES.find((r) => r.id === job.recipe)!;
-    if (w.loyalty < 15) {
+    if (w.loyalty < WORKER_RECONCILIATION.refusalBelow) {
+      this.workerPauses.set(w.id, 'loyalty');
       w.status = 'Refusing work: restore trust and safe pay';
       s.status = w.status;
       return;
@@ -1336,6 +1506,7 @@ export class PropertyWorld {
             ? Math.min(12, Math.max(0, Math.floor(actualCustomers)))
             : 0;
           if (e.dailySales >= demand) {
+            this.workerPauses.set(w.id, 'customers');
             w.status = 'Waiting for local customers; daily orders are limited';
             s.status = w.status;
             return;
@@ -1348,6 +1519,7 @@ export class PropertyWorld {
           `estate-wage:${job.id}:${job.completed}`,
         );
         if (!paid.ok) {
+          this.workerPauses.set(w.id, 'wages');
           w.unpaidSince ??= now;
           w.status = 'Wages missing; this batch cannot start';
           if (now - w.unpaidSince >= 60) {
@@ -1363,6 +1535,7 @@ export class PropertyWorld {
         w.loyalty = Math.min(100, w.loyalty + 0.5);
       }
       if (!enough(job.reserved, recipe.inputs)) {
+        this.workerPauses.set(w.id, 'inputs');
         w.status = 'Reserved inputs are missing; production halted';
         s.status = w.status;
         return;
@@ -1374,6 +1547,7 @@ export class PropertyWorld {
     if (w.phase === 'carrying-input') {
       const approach = this.approach(e, s, now);
       if (!approach.point) {
+        this.workerPauses.set(w.id, approach.pending ? 'route-planning' : 'route-unreachable');
         w.status = approach.pending
           ? 'Checking the workstation delivery route'
           : 'Unreachable: workstation approach is blocked. Clear a route to the estate entrance.';
@@ -1390,6 +1564,7 @@ export class PropertyWorld {
     if (w.phase === 'working') {
       const approach = this.approach(e, s, now);
       if (!approach.point) {
+        this.workerPauses.set(w.id, approach.pending ? 'route-planning' : 'route-unreachable');
         w.status = approach.pending
           ? 'Checking the workstation delivery route'
           : 'Unreachable: workstation approach is blocked. Clear a route to the estate entrance.';
@@ -1419,6 +1594,7 @@ export class PropertyWorld {
         units(e.storage.items) + units(w.cargo.items) > PROPERTY_RULES.maxBufferUnits ||
         e.storage.coins + w.cargo.coins > 100000000
       ) {
+        this.workerPauses.set(w.id, 'storage');
         w.status = 'Storage full; carrying the completed batch safely';
         s.status = w.status;
         return;

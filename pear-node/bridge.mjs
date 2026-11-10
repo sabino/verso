@@ -192,14 +192,29 @@ export async function createPearBridge({
   const root = resolve(directory);
   await mkdir(join(root, 'latest'), { recursive: true, mode: 0o700 });
   const store = new Corestore(join(root, 'cores'));
-  await store.ready();
-  const swarm = new Hyperswarm({ maxPeers: 16, ...(bootstrap !== undefined ? { bootstrap } : {}) });
+  let swarm;
+  try {
+    await store.ready();
+    swarm = new Hyperswarm({ maxPeers: 16, ...(bootstrap !== undefined ? { bootstrap } : {}) });
+  } catch (error) {
+    await store.close().catch(() => {});
+    throw error;
+  }
   const feeds = new Map(),
     latest = new Map(),
     writes = new Map(),
     scans = new Set();
   let closing = false,
     registryWrite = Promise.resolve();
+  const operations = new Set();
+  function admit(operation) {
+    if (closing) return Promise.reject(new BridgeError(503, 'This replica node is closing.'));
+    // Register before the first verification/configuration await; shutdown drains every admitted caller.
+    const task = Promise.resolve().then(operation);
+    operations.add(task);
+    void task.finally(() => operations.delete(task)).catch(() => {});
+    return task;
+  }
   swarm.on('connection', (socket) => {
     socket.on('error', (error) => {
       if (!closing) onError(error);
@@ -401,7 +416,14 @@ export async function createPearBridge({
     await store.close();
     throw error;
   }
-  async function publish(checkpoint) {
+  const publish = (checkpoint) => admit(() => publishAdmitted(checkpoint));
+  const followKey = (key) =>
+    admit(async () => {
+      if (typeof key !== 'string' || !HEX.test(key))
+        throw new BridgeError(422, 'Provide a 64-digit public Hypercore key.');
+      return metadata(await queue('registry', () => openFeed({ key })));
+    });
+  async function publishAdmitted(checkpoint) {
     const raw = Buffer.from(JSON.stringify(checkpoint));
     if (raw.length > MAX_MESSAGE) throw new BridgeError(413, 'Checkpoint exceeds 4 MiB.');
     if (!publicCheckpointShape(checkpoint) || !(await verifyRoomCheckpoint(checkpoint)))
@@ -534,8 +556,8 @@ export async function createPearBridge({
       }
       if (!only(value, ['key']) || typeof value.key !== 'string' || !HEX.test(value.key))
         throw new BridgeError(422, 'Provide a 64-digit public Hypercore key.');
-      const result = await queue('registry', () => openFeed({ key: value.key }));
-      respond(response, 201, metadata(result), origin);
+      const result = await followKey(value.key);
+      respond(response, 201, result, origin);
     } catch (error) {
       if (!response.headersSent)
         respond(
@@ -567,10 +589,7 @@ export async function createPearBridge({
     url: `http://${host}:${server.address().port}`,
     publish,
     feeds: () => [...feeds.values()].map(metadata),
-    async follow(key) {
-      if (!HEX.test(key)) throw Error('Invalid public key.');
-      return metadata(await queue('registry', () => openFeed({ key })));
-    },
+    follow: followKey,
     async flush() {
       await swarm.flush();
       await Promise.allSettled([...feeds.values()].map((f) => scan(f)));
@@ -581,6 +600,7 @@ export async function createPearBridge({
         closing = true;
         server.closeAllConnections();
         await new Promise((resolve) => server.close(resolve));
+        await Promise.allSettled([...operations]);
         await Promise.allSettled([...writes.values()]);
         for (const f of feeds.values()) f.download?.destroy();
         await swarm.clear();
