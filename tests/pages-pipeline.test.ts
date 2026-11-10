@@ -70,6 +70,27 @@ test('migration compatibility archive must match its committed checksum before w
     'export const game=1;',
   );
 });
+test('divergent published archives retain every generation regardless of merge order', (t) => {
+  const { root, dist } = fixture(t);
+  const archives = ['older', 'newer'].map((generation) => {
+    const source = path.join(root, generation);
+    fs.mkdirSync(path.join(source, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(source, 'assets/shared.js'), 'unchanged');
+    fs.writeFileSync(path.join(source, `assets/${generation}.js`), generation);
+    const archive = path.join(root, generation + '.tgz');
+    execFileSync('tar', ['-czf', archive, '-C', source, 'assets']);
+    return archive;
+  });
+  for (const archive of archives.toReversed()) mergeArchive(archive, dist, 'retained');
+  for (const generation of ['older', 'newer']) {
+    assert.equal(fs.readFileSync(path.join(dist, `assets/${generation}.js`), 'utf8'), generation);
+  }
+  assert.equal(fs.readFileSync(path.join(dist, 'assets/shared.js'), 'utf8'), 'unchanged');
+  assert.equal(
+    fs.readFileSync(path.join(dist, 'assets/index-abc.js'), 'utf8'),
+    'export const game=1;',
+  );
+});
 test('archive traversal, links, foreign roots and hashed filename collisions fail closed', (t) => {
   const { root, dist } = fixture(t);
   for (const kind of ['traversal', 'symlink', 'foreign', 'collision']) {

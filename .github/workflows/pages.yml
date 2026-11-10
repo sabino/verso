@@ -85,7 +85,7 @@ jobs:
           cache: npm
       - uses: actions/configure-pages@983d7736d9b0ae728b81ab479565c72886d7745b # v5
       - run: npm ci && npm run build
-      - name: Download pinned migration and last deployed asset archive
+      - name: Download pinned migration and all retained asset generations
         env:
           GH_TOKEN: ${{ github.token }}
         run: node scripts/fetch-pages-history.mjs
