@@ -1,4 +1,5 @@
 import { weaponProfile } from './equipment.ts';
+import { EnemyNavigation } from './enemy-navigation.ts';
 import { generateArtifact, normalizeArtifactDesign } from './artifacts.ts';
 import { createProgression, skillBonuses } from './progression.ts';
 import type { Appearance, Npc, Point } from './types.ts';
@@ -460,6 +461,7 @@ export function validSharedCombatFrame(value: unknown): value is SharedCombatFra
  */
 export class SharedCombat {
   private enemies = new Map<string, SharedEnemy>();
+  private navigation = new EnemyNavigation();
   private records = new Map<string, SharedEnemy>();
   private dead = new Set<string>();
   private peaceful = new Set<string>();
@@ -562,6 +564,7 @@ export class SharedCombat {
   restore(checkpoint: SharedCombatCheckpoint) {
     if (!validSharedCombatCheckpoint(checkpoint)) throw Error('Invalid shared combat checkpoint.');
     const value = copy(checkpoint);
+    this.navigation.clear();
     this.seq = value.snapshot.seq;
     this.serial = Math.max(value.serial, ...value.snapshot.projectiles.map((p) => p.id));
     this.enemies = new Map(value.snapshot.enemies.map((n) => [n.id, n]));
@@ -1173,6 +1176,7 @@ export class SharedCombat {
       this.discovery = 0.5;
       this.discover(this.peers);
     }
+    this.navigation.begin(remaining, this.enemies.keys());
     while (remaining > 0.000001) {
       const step = Math.min(remaining, 1 / 30);
       this.step(step);
@@ -1311,13 +1315,17 @@ export class SharedCombat {
           damage: clamp(Math.round(profile.damage * 0.31), 5, 10),
         };
       } else if (!canAim && d > (target ? 0.85 : 0.5)) {
-        const speed = clamp(npc.speed || 1.5, 0, 2.4);
-        this.move(
-          npc,
-          ((destination.x - npc.x) / d) * speed * dt,
-          ((destination.y - npc.y) / d) * speed * dt,
+        const next = this.navigation.waypoint(npc.id, npc, destination, (point) =>
+          this.clear(point),
         );
-        npc.heading = Math.atan2(destination.y - npc.y, destination.x - npc.x);
+        if (!next) continue;
+        const speed = clamp(npc.speed || 1.5, 0, 2.4),
+          length = distance(npc, next);
+        if (length < 0.001) continue;
+        const heading = Math.atan2(next.y - npc.y, next.x - npc.x),
+          travel = Math.min(length, speed * dt);
+        this.move(npc, Math.cos(heading) * travel, Math.sin(heading) * travel);
+        npc.heading = heading;
       }
     }
     for (const arrow of this.projectiles) {
@@ -1468,8 +1476,23 @@ export class SharedCombat {
             x: (destination.x - npc.x) / Math.max(0.01, distance(npc, destination)),
             y: (destination.y - npc.y) / Math.max(0.01, distance(npc, destination)),
           };
-      if (distance(npc, destination) > 0.3)
-        this.move(npc, direction.x * npc.speed * dt, direction.y * npc.speed * dt);
+      if (distance(npc, destination) > 0.3) {
+        if (!target || !this.lineOfSight(npc, target)) {
+          const next = this.navigation.waypoint(npc.id, npc, destination, (point) =>
+            this.clear(point),
+          );
+          if (next) {
+            const length = distance(npc, next),
+              travel = Math.min(npc.speed * dt, length);
+            if (length > 0.001)
+              this.move(
+                npc,
+                ((next.x - npc.x) / length) * travel,
+                ((next.y - npc.y) / length) * travel,
+              );
+          }
+        } else this.move(npc, direction.x * npc.speed * dt, direction.y * npc.speed * dt);
+      }
     }
   }
 }

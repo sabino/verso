@@ -6,6 +6,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { measureStableClickTarget } from './browser-harness.mjs';
+import { routeBeyondDistance } from './browser-route.mjs';
 const endpoint = process.argv[2],
   url = process.argv[3] || 'http://localhost:4174/';
 if (
@@ -15,7 +17,9 @@ if (
 )
   throw Error('Use the verified workspace endpoint and the local or published Verso frontend.');
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
-const out = path.join(root, '.dream-loop/stichos-production');
+const out = process.env.VERSO_PRODUCTION_EVIDENCE
+  ? path.resolve(process.env.VERSO_PRODUCTION_EVIDENCE)
+  : path.join(root, '.dream-loop/stichos-production');
 fs.mkdirSync(out, { recursive: true });
 const started = new Date(),
   results = [],
@@ -64,7 +68,7 @@ async function connect(address, events = () => {}) {
     },
   };
 }
-async function traveler(name, seed = '3886') {
+async function traveler(name) {
   const { browserContextId } = await browser.send('Target.createBrowserContext');
   const { targetId } = await browser.send('Target.createTarget', {
     url: 'about:blank',
@@ -143,9 +147,8 @@ async function traveler(name, seed = '3886') {
   };
   const click = async (selector) => {
     for (let attempt = 0; attempt < 12; attempt++) {
-      const g = await read(
-        `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e||e.disabled)throw Error('Missing control '+${JSON.stringify(selector)});const r=e.getBoundingClientRect();let top=0,bottom=innerHeight,scroller=null;for(let p=e.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();if(/auto|scroll|hidden/.test(s.overflowY)){top=Math.max(top,b.top);bottom=Math.min(bottom,b.bottom);if(/auto|scroll/.test(s.overflowY)&&p.scrollHeight>p.clientHeight+1&&!scroller)scroller={x:b.x+b.width/2,y:b.y+b.height/2};}}const x=r.x+r.width/2,y=(Math.max(r.top,top)+Math.min(r.bottom,bottom))/2;if(r.bottom<=top||r.top>=bottom||!e.contains(document.elementFromPoint(x,y)))return{scroll:scroller??{x:innerWidth/2,y:innerHeight/2},delta:Math.max(-500,Math.min(500,(r.top+r.bottom)/2-(top+bottom)/2))};return{x,y};})()`,
-      );
+      await focus();
+      const g = await read(`(${measureStableClickTarget.toString()})(${JSON.stringify(selector)})`);
       if (g.scroll) {
         await page.send('Input.dispatchMouseEvent', {
           type: 'mouseWheel',
@@ -164,6 +167,17 @@ async function traveler(name, seed = '3886') {
     await click(selector);
     await key('a', 'KeyA', 65, 0, 2);
     await page.send('Input.insertText', { text });
+  };
+  const selectIndex = async (selector, index) => {
+    await click(selector);
+    await key('Home', 'Home', 36);
+    for (let i = 0; i < index; i++) await key('ArrowDown', 'ArrowDown', 40);
+    await key('Enter', 'Enter', 13);
+    assert.equal(
+      await read(`document.querySelector(${JSON.stringify(selector)}).selectedIndex`),
+      index,
+      'The native select accepted the requested option',
+    );
   };
   const state = () => read('window.stichos.state');
   const shot = async (label) => {
@@ -202,6 +216,7 @@ async function traveler(name, seed = '3886') {
     point,
     click,
     fill,
+    selectIndex,
     state,
     shot,
     worldClick,
@@ -222,7 +237,9 @@ async function traveler(name, seed = '3886') {
   await page.send('Page.navigate', { url });
   await focus();
   await wait("window.stichos?.state.modal==='title'", 'title ready');
-  await fill('#s-seed-input', seed);
+  await read('document.fonts.ready.then(()=>true)');
+  // Theo's explicit entry selects the canonical Stíchos seed; the custom seed
+  // input belongs to generated residents and does not select his geography.
   await click('#v-theo-story');
   await wait('window.stichos.state.transfer', 'opening intro');
   await click('#s-skip');
@@ -328,6 +345,62 @@ try {
   );
   await c.shot('02-garden-constructed');
   await c.click('#v-work');
+  assert.match(
+    await c.read("document.querySelector('.v-work-clock').textContent"),
+    /paused.*Return to the world/i,
+    'Solo production explains why waiting in its menu cannot finish a job',
+  );
+  const preview = () =>
+    c.read(
+      `(()=>{const p=document.querySelector('[data-machine-preview="${id}"]');return {inputs:p.querySelector('[data-job-inputs]').textContent,output:p.querySelector('[data-job-output]').textContent,seconds:p.querySelector('[data-job-seconds]').textContent,readiness:p.querySelector('[data-job-readiness]').textContent,disabled:document.querySelector('[data-machine-start="${id}"]').disabled};})()`,
+    );
+  const one = await preview();
+  assert.match(one.inputs, /1 cequin.*1 timber/i);
+  assert.match(one.output, /3 cequin/i);
+  assert.equal(one.seconds, '80s');
+  assert.equal(one.disabled, false);
+  await c.selectIndex(`[data-machine-batches="${id}"]`, 4);
+  const five = await preview();
+  assert.match(five.inputs, /5 cequin.*5 timber/i);
+  assert.match(five.output, /15 cequin/i);
+  assert.equal(five.seconds, '400s');
+  assert.equal(five.disabled, true, 'An unaffordable batch count cannot load inputs');
+  assert.ok(five.readiness.length > 10, 'The disabled action explains the missing requirement');
+  await c.selectIndex(`[data-machine-recipe="${id}"]`, 1);
+  const alternate = await preview();
+  assert.match(alternate.inputs, /5 heartleaf.*5 timber/i);
+  assert.match(alternate.output, /15 heartleaf/i);
+  assert.equal(alternate.disabled, true);
+  assert.deepEqual((await c.state()).inventory, built.inventory, 'Previewing cannot spend inputs');
+  pass('Recipe and batch selectors show exact total inputs, output, time, and unavailable reason');
+  await c.shot('02b-five-batch-preview');
+  await c.selectIndex(`[data-machine-recipe="${id}"]`, 0);
+  await c.selectIndex(`[data-machine-batches="${id}"]`, 0);
+  await c.page.send('Emulation.setDeviceMetricsOverride', {
+    width: 390,
+    height: 844,
+    deviceScaleFactor: 1,
+    mobile: true,
+  });
+  await c.wait('innerWidth===390', 'phone viewport');
+  assert.equal(
+    await c.read(
+      "(()=>{const p=document.querySelector('[data-screen=production]');return p.scrollWidth<=p.clientWidth+1 && document.documentElement.scrollWidth<=innerWidth;})()",
+    ),
+    true,
+    'The production preview fits a 390px phone without horizontal overflow',
+  );
+  await c.shot('02c-phone-production-preview');
+  await c.click('#v-work-return');
+  await c.wait("window.stichos.state.modal===''", 'phone Return to the world resumes play');
+  pass('The phone production menu keeps its batch preview and return action usable');
+  await c.page.send('Emulation.setDeviceMetricsOverride', {
+    width: 1440,
+    height: 960,
+    deviceScaleFactor: 1,
+    mobile: false,
+  });
+  await c.click('#v-work');
   await c.click(`[data-machine-start="${id}"]`);
   const loaded = await c.state();
   assert.equal(loaded.inventory.cequin, built.inventory.cequin - 1);
@@ -372,15 +445,22 @@ try {
     `${((Date.now() - begun) / 1000).toFixed(1)} wall seconds`,
   );
   await c.shot('05-garden-ready');
-  const far = { x: site.x + 4, y: site.y };
-  const walkable = await c.read(`!window.stichos.blocked(${far.x},${far.y})`);
-  if (walkable) {
-    await approach({ ...far, id: 'distant viewing point' });
-    await c.click('#v-work');
-    assert(await c.read(`document.querySelector('[data-machine-collect="${id}"]').disabled`));
-    await c.click('#v-work-close');
-    pass('A distant output cannot be collected remotely');
-  }
+  // A clear distant tile can belong to a disconnected pocket. Select it from
+  // the player's reachable component and walk the exact discovered route.
+  const farRoute = await c.read(
+    `(${routeBeyondDistance.toString()})(window.stichos.state.player,${JSON.stringify(site)},(x,y)=>window.stichos.blocked(x,y))`,
+  );
+  assert.ok(farRoute, 'A reachable distant viewing point exists in this starter world');
+  for (const point of farRoute) await keyWalk(point);
+  const distantPlayer = (await c.state()).player;
+  assert.ok(
+    Math.hypot(distantPlayer.x - site.x, distantPlayer.y - site.y) > 3,
+    'The real player is outside the platform collection radius',
+  );
+  await c.click('#v-work');
+  assert(await c.read(`document.querySelector('[data-machine-collect="${id}"]').disabled`));
+  await c.click('#v-work-close');
+  pass('A distant output cannot be collected remotely');
   await approach({ ...site, id: 'garden' });
   await c.click('#v-work');
   await c.click(`[data-machine-collect="${id}"]`);

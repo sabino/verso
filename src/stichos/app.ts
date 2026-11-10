@@ -2866,31 +2866,28 @@ function workMenu() {
                 : missing.length
                   ? `Need ${missing.join(', ')}`
                   : '';
-        return `<article><canvas data-production-preview="${k.id}" width="160" height="110" aria-label="${esc(k.name)} structure"></canvas><h3>${esc(k.name)}</h3><p>${k.coins} coins · ${amounts(k.items)}</p><p>${esc(k.description)}</p><button data-build-kind="${k.id}" ${reason ? 'disabled' : ''}>Place in world</button>${reason ? `<small class="v-work-budget">${esc(reason)}</small>` : ''}</article>`;
+        return `<article><canvas data-production-preview="${k.id}" width="160" height="140" aria-label="${esc(k.name)} structure"></canvas><h3>${esc(k.name)}</h3><p>${k.coins} coins · ${amounts(k.items)}</p><p>${esc(k.description)}</p><button data-build-kind="${k.id}" ${reason ? 'disabled' : ''}>Place in world</button>${reason ? `<small class="v-work-budget">${esc(reason)}</small>` : ''}</article>`;
       },
     ).join('')}</div><div class="v-production-list">${
       machines
         .map((m) => {
           const near =
-            game.spaceId === 'surface' && Math.hypot(m.x - game.player.x, m.y - game.player.y) < 3;
+            game.spaceId === 'surface' && Math.hypot(m.x - game.player.x, m.y - game.player.y) <= 3;
           const dismantle = game.dismantleProductionPreview(m.id);
-          return `<article><canvas data-production-preview="${m.kind}" data-production-progress="${m.progress}" width="160" height="110" aria-label="${esc(m.kind)} work platform"></canvas><header><b>${esc(PRODUCTION_KINDS.find((k) => k.id === m.kind)!.name)}</b><span>${esc({ idle: 'Ready for inputs', working: 'Making the next batch', ready: 'Output ready', blocked: 'Work interrupted', 'awaiting-claim': 'Waiting for room confirmation' }[m.phase] ?? m.phase)} · ${Math.round(Math.hypot(m.x - game.player.x, m.y - game.player.y))} paces away</span></header>${m.job ? `<progress value="${m.totalProgress}" max="1" aria-label="Whole job progress"></progress><p>${esc(m.job.blocked || `${m.job.completed}/${m.job.batches} batches completed`)} · ${Math.floor(m.totalProgress * 100)}% total · ${Math.ceil(m.remainingSeconds)}s of work left</p>` : ''}<p>Stored: ${amounts(m.output)} ${!near ? '· Approach to supply or collect' : ''}</p>${
+          return `<article><canvas data-production-preview="${m.kind}" data-production-progress="${m.progress}" data-production-id="${m.id}" width="160" height="140" aria-label="${esc(m.kind)} work platform"></canvas><header><b>${esc(PRODUCTION_KINDS.find((k) => k.id === m.kind)!.name)}</b><span>${esc({ idle: 'Ready for inputs', working: 'Making the next batch', ready: 'Output ready', blocked: 'Work interrupted', 'awaiting-claim': 'Waiting for room confirmation' }[m.phase] ?? m.phase)} · ${Math.round(Math.hypot(m.x - game.player.x, m.y - game.player.y))} paces away</span></header>${m.job ? `<progress value="${m.totalProgress}" max="1" aria-label="Whole job progress"></progress><p>${esc(m.job.blocked || `${m.job.completed}/${m.job.batches} batches completed`)} · ${Math.floor(m.totalProgress * 100)}% total · ${Math.ceil(m.remainingSeconds)}s of work left</p>` : ''}<p>Stored: ${amounts(m.output)} ${!near ? '· Approach to supply or collect' : ''}</p>${
             !m.job
-              ? `<select aria-label="Production recipe" data-machine-recipe="${m.id}">${game.productionRecipes
+              ? `<div class="v-job-controls"><label>Recipe<select aria-label="Production recipe" data-machine-recipe="${m.id}">${game.productionRecipes
                   .filter((r) => r.kind === m.kind)
-                  .map(
-                    (r) =>
-                      `<option value="${r.id}">${esc(r.name)} · ${amounts(r.inputs)} → ${amounts(r.output)} · ${r.seconds}s</option>`,
-                  )
+                  .map((r) => `<option value="${r.id}">${esc(r.name)}</option>`)
                   .join(
                     '',
-                  )}</select><select aria-label="Batch count" data-machine-batches="${m.id}">${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n} batch${n > 1 ? 'es' : ''}</option>`).join('')}</select><button data-machine-start="${m.id}" ${near ? '' : 'disabled'}>Load inputs</button>`
+                  )}</select></label><label>Batches<select aria-label="Batch count" data-machine-batches="${m.id}">${[1, 2, 3, 4, 5].map((n) => `<option value="${n}">${n} batch${n > 1 ? 'es' : ''}</option>`).join('')}</select></label></div><div class="v-job-preview" data-machine-preview="${m.id}" aria-live="polite" aria-atomic="true"></div><button data-machine-start="${m.id}" disabled>Load inputs</button>`
               : `<button data-machine-cancel="${m.id}" ${near ? '' : 'disabled'}>Cancel & retrieve inputs</button>${m.phase === 'blocked' ? `<button data-machine-retry="${m.id}" ${near ? '' : 'disabled'}>Retry</button>` : ''}`
           }<button data-machine-collect="${m.id}" ${near && Object.values(m.output).some((n) => n) ? '' : 'disabled'}>Collect output</button><button data-machine-track="${m.id}">Track</button><details><summary>Move this work elsewhere</summary><p>${esc(dismantle.message)}</p><button data-machine-dismantle="${m.id}" ${dismantle.ok ? '' : 'disabled'}>Dismantle & salvage</button></details></article>`;
         })
         .join('') ||
       '<p>No production platforms yet. Gather timber and ore with your tools, then choose a clear work site.</p>'
-    }</div>`,
+    }</div><button id="v-work-return" class="s-primary">Return to the world</button>`,
   );
   const workFrame = document.querySelector<HTMLElement>('[data-screen=production]')!;
   const workTabs = document.createElement('nav');
@@ -2899,6 +2896,10 @@ function workMenu() {
   workFrame.dataset.workView = machines.length ? 'machines' : 'build';
   workTabs.innerHTML = `<button data-work-view="build" aria-pressed="${!machines.length}">Build a platform</button><button data-work-view="machines" aria-pressed="${!!machines.length}">My work · ${machines.length}</button>`;
   workFrame.querySelector('.s-dialog-heading')!.after(workTabs);
+  const workClock = document.createElement('p');
+  workClock.className = 'v-work-clock';
+  workClock.textContent = 'Your production is paused here. Return to the world to keep working.';
+  workTabs.after(workClock);
   workTabs.querySelectorAll<HTMLButtonElement>('button').forEach(
     (b) =>
       (b.onclick = () => {
@@ -2912,18 +2913,26 @@ function workMenu() {
   document.querySelectorAll<HTMLCanvasElement>('[data-production-preview]').forEach((c) => {
     const ctx = c.getContext('2d')!;
     ctx.imageSmoothingEnabled = false;
+    const machine = machines.find((m) => m.id === c.dataset.productionId);
     drawProduction(
       ctx,
       c.dataset.productionPreview as ProductionKind,
       80,
-      85,
+      100,
       2,
       Number(c.dataset.productionProgress ?? 0),
-      false,
+      machine?.phase === 'working',
       0,
+      {
+        phase: machine?.phase,
+        stored: Object.values(machine?.output ?? {}).reduce((sum, n) => sum + (n ?? 0), 0),
+        totalProgress: machine?.totalProgress,
+        reducedMotion: true,
+      },
     );
   });
   el('v-work-close').onclick = closeModal;
+  el('v-work-return').onclick = closeModal;
   document.querySelectorAll<HTMLElement>('[data-build-kind]').forEach(
     (n) =>
       (n.onclick = () => {
@@ -2937,6 +2946,31 @@ function workMenu() {
     workMenu();
     toast(result.message);
   };
+  for (const machine of machines.filter((m) => !m.job)) {
+    const recipe = workFrame.querySelector<HTMLSelectElement>(
+      `[data-machine-recipe="${machine.id}"]`,
+    )!;
+    const batches = workFrame.querySelector<HTMLSelectElement>(
+      `[data-machine-batches="${machine.id}"]`,
+    )!;
+    const summary = workFrame.querySelector<HTMLElement>(`[data-machine-preview="${machine.id}"]`)!;
+    const start = workFrame.querySelector<HTMLButtonElement>(
+      `[data-machine-start="${machine.id}"]`,
+    )!;
+    const updatePreview = () => {
+      const preview = game.productionJobPreview(machine.id, recipe.value, Number(batches.value));
+      start.disabled = !preview.ok;
+      const source = preview.recipe?.source;
+      const sources =
+        source && preview.availableSources !== null
+          ? `<p data-job-sources>${preview.availableSources} unreserved ${source === 'pine' ? 'timber trees' : 'ore outcrops'} nearby · ${preview.batches} needed</p>`
+          : '';
+      summary.innerHTML = `<dl><div><dt>Total inputs</dt><dd data-job-inputs>${esc(amounts(preview.inputs))}</dd></div><div><dt>Total output</dt><dd data-job-output>${esc(amounts(preview.output))}</dd></div><div><dt>Active work</dt><dd data-job-seconds>${preview.seconds}s</dd></div></dl>${sources}<p class="v-work-budget" data-job-readiness>${esc(preview.message)}</p>`;
+    };
+    recipe.onchange = updatePreview;
+    batches.onchange = updatePreview;
+    updatePreview();
+  }
   document.querySelectorAll<HTMLElement>('[data-machine-start]').forEach(
     (n) =>
       (n.onclick = () => {

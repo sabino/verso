@@ -16,6 +16,7 @@ import {
 import { ActorLedger, validActorLedgerSave } from './actor-ledger.ts';
 import { validPersistentNpc } from './persistent-npc.ts';
 import { findWalkingPath } from './pathfinding.ts';
+import { EnemyNavigation } from './enemy-navigation.ts';
 import {
   techniqueById,
   techniquesFor,
@@ -946,6 +947,7 @@ export class Stichos {
   private correspondenceJobs = new Map<string, CorrespondenceJob>();
   private arrows: Arrow[] = [];
   private enemyIntents = new Map<string, EnemyIntent>();
+  private enemyNavigation = new EnemyNavigation();
   private nextEffect = 1;
   private techniqueRecovery = new Map<TechniqueId, number>();
   private preparing: {
@@ -1736,6 +1738,8 @@ export class Stichos {
     });
   }
   retireLife(index: number, customization: LifeCustomization = {}) {
+    if (this.spaceId !== 'surface')
+      return { ok: false, message: 'Return to the surface before choosing another resident.' };
     if (this.phase !== 'playing' || this.sharedWorld || this.nearbyThreat())
       return { ok: false, message: 'Settle safely in solo play before retiring this life.' };
     let candidate: LifeCandidate;
@@ -1936,38 +1940,47 @@ export class Stichos {
   productionJobPreview(id: string, recipeId: string, batches = 1) {
     const s = this.production.structures.find((s) => s.id === id),
       recipe = PRODUCTION_RECIPES.find((r) => r.id === recipeId && r.kind === s?.kind),
-      fail = (message: string) => ({
-        ok: false,
-        message,
-        recipe: recipe ?? null,
-        sources: [] as ReturnType<typeof productionSources>,
-        inputs: {} as Partial<Record<ItemId, number>>,
-        batches,
-      });
-    if (!s || !recipe || !Number.isInteger(batches) || batches < 1 || batches > 5)
+      validBatches = Number.isInteger(batches) && batches >= 1 && batches <= 5,
+      totals = (items: Partial<Record<ItemId, number>>): Partial<Record<ItemId, number>> =>
+        Object.fromEntries(Object.entries(items).map(([item, n]) => [item, n! * batches])),
+      inputs = recipe && validBatches ? totals(recipe.inputs) : {},
+      output = recipe && validBatches ? totals(recipe.output) : {},
+      seconds = recipe && validBatches ? recipe.seconds * batches : 0;
+    let availableSources: number | null = null;
+    const fail = (message: string) => ({
+      ok: false,
+      message,
+      recipe: recipe ?? null,
+      sources: [] as ReturnType<typeof productionSources>,
+      inputs,
+      output,
+      seconds,
+      availableSources,
+      batches,
+    });
+    if (!s || !recipe || !validBatches)
       return fail('Choose one to five batches from this structure’s recipes.');
     if (this.spaceId !== 'surface' || this.phase !== 'playing' || distance(this.player, s) > 3)
       return fail('Load inputs beside the actual structure.');
     if (s.job) return fail('Finish or cancel the current job first.');
     if (this.production.jobSerial >= 1000000) return fail('The production ledger is full.');
-    const inputs = Object.fromEntries(
-      Object.entries(recipe.inputs).map(([item, n]) => [item, n! * batches]),
-    ) as Partial<Record<ItemId, number>>;
-    if (!this.has(inputs)) return fail(`The job needs ${this.costText(inputs)}.`);
-    const stored = Object.values(s.output).reduce((a, b) => a + (b ?? 0), 0),
-      yieldCount = Object.values(recipe.output).reduce((a, b) => a + (b ?? 0), 0) * batches;
-    if (stored + yieldCount > 60)
-      return fail('Retrieve the stored output before loading that many batches.');
-    const sources = recipe.source
+    const candidates = recipe.source
       ? productionSources(
           this.world.propsAround(s.x, s.y, 16),
           recipe.source,
           s,
           this.removed,
           this.productionReservations(),
-          batches,
+          Number.MAX_SAFE_INTEGER,
         )
       : [];
+    availableSources = recipe.source ? candidates.length : null;
+    if (!this.has(inputs)) return fail(`The job needs ${this.costText(inputs)}.`);
+    const stored = Object.values(s.output).reduce((a, b) => a + (b ?? 0), 0),
+      yieldCount = Object.values(output).reduce((a, b) => a + (b ?? 0), 0);
+    if (stored + yieldCount > 60)
+      return fail('Retrieve the stored output before loading that many batches.');
+    const sources = candidates.slice(0, batches);
     if (recipe.source && sources.length !== batches)
       return fail(
         `This job needs ${batches} unreserved ${recipe.source === 'pine' ? 'timber trees' : 'ore outcrops'} within sixteen paces.`,
@@ -1978,6 +1991,9 @@ export class Stichos {
       recipe,
       sources,
       inputs,
+      output,
+      seconds,
+      availableSources,
       batches,
     };
   }
@@ -2139,12 +2155,33 @@ export class Stichos {
       return { ok: false, message: 'Collect output beside the actual platform.' };
     if (!Object.values(s.output).some((n) => n && n > 0))
       return { ok: false, message: 'No completed output is waiting.' };
-    if (!this.gain(s.output))
-      return { ok: false, message: 'Make room for the complete stored output.' };
-    const output = clone(s.output);
-    s.output = {};
-    grantPractice(this.progression, 'crafting', 2);
-    return { ok: true, message: `Retrieved ${this.costText(output)}.`, output };
+    let room = Math.max(0, this.capacity - this.carried);
+    if (!room) return { ok: false, message: 'Make room in your satchel to collect output.' };
+    const output: Partial<Record<ItemId, number>> = {};
+    // Stable item order also makes mixed stores from older saves collect predictably.
+    for (const id of Object.keys(s.output).sort() as ItemId[]) {
+      const amount = Math.min(s.output[id] ?? 0, room);
+      if (amount > 0) {
+        output[id] = amount;
+        room -= amount;
+      }
+    }
+    if (!this.gain(output))
+      return { ok: false, message: 'Make room in your satchel to collect output.' };
+    for (const [id, amount] of Object.entries(output)) {
+      const key = id as ItemId;
+      s.output[key] = (s.output[key] ?? 0) - amount!;
+      if (!s.output[key]) delete s.output[key];
+    }
+    const remaining = Object.values(s.output).reduce((sum, amount) => sum + (amount ?? 0), 0);
+    // Splitting one stored delivery into small trips must not multiply practice rewards.
+    if (!remaining) grantPractice(this.progression, 'crafting', 2);
+    return {
+      ok: true,
+      message: `Retrieved ${this.costText(output)}.${remaining ? ` ${remaining} item${remaining === 1 ? '' : 's'} remain stored at the platform.` : ''}`,
+      output,
+      remaining,
+    };
   }
   dismantleProductionPreview(id: string) {
     const structure = this.production.structures.find((s) => s.id === id);
@@ -3025,6 +3062,7 @@ export class Stichos {
     this.sharedWarnings.clear();
     this.arrows = [];
     this.enemyIntents.clear();
+    this.enemyNavigation.clear();
     if (!active) this.sharedEnemies.clear();
     this.refreshNpcs();
   }
@@ -4458,6 +4496,7 @@ export class Stichos {
     const active = new Set(
       this.npcs.filter((npc) => npc.hp > 0 && npc.hostile).map((npc) => npc.id),
     );
+    this.enemyNavigation.begin(dt, active);
     for (const [id, intent] of this.enemyIntents)
       if (!active.has(id)) {
         intent.warning.age = intent.warning.duration;
@@ -4608,12 +4647,18 @@ export class Stichos {
         !canAim &&
         targetDistance > (npc.hostile && range < 8 ? 0.85 : route?.points.length ? 0.1 : 0.5)
       ) {
-        const dx = target.x - npc.x,
-          dy = target.y - npc.y;
+        const destination = npc.hostile
+          ? this.enemyNavigation.waypoint(npc.id, npc, target, (point) => this.clear(point))
+          : target;
+        if (!destination) continue;
+        const dx = destination.x - npc.x,
+          dy = destination.y - npc.y;
+        const remaining = Math.hypot(dx, dy);
+        if (remaining < 0.001) continue;
         const speed = Math.min(2.4, npc.speed || 1.5);
         const before = { x: npc.x, y: npc.y };
-        const step = Math.min(speed * dt, targetDistance);
-        this.move(npc, (dx / targetDistance) * step, (dy / targetDistance) * step);
+        const step = Math.min(speed * dt, remaining);
+        this.move(npc, (dx / remaining) * step, (dy / remaining) * step);
         npc.heading = Math.atan2(dy, dx);
         npc.phase += distance(npc, before) * 2.5;
       }
@@ -4714,7 +4759,23 @@ export class Stichos {
             y: (destination.y - npc.y) / Math.max(0.01, d),
           };
       const before = { x: npc.x, y: npc.y };
-      if (d > 0.3) this.move(npc, steering.x * npc.speed * dt, steering.y * npc.speed * dt);
+      if (d > 0.3) {
+        if (!target || !this.lineOfSight(npc, target)) {
+          const next = this.enemyNavigation.waypoint(npc.id, npc, destination, (point) =>
+            this.clear(point),
+          );
+          if (next) {
+            const length = distance(npc, next),
+              step = Math.min(npc.speed * dt, length);
+            if (length > 0.001)
+              this.move(
+                npc,
+                ((next.x - npc.x) / length) * step,
+                ((next.y - npc.y) / length) * step,
+              );
+          }
+        } else this.move(npc, steering.x * npc.speed * dt, steering.y * npc.speed * dt);
+      }
       npc.phase += distance(npc, before) * 2.5;
     }
   }
@@ -6963,6 +7024,7 @@ export class Stichos {
       this.preparing = null;
       this.stepping = null;
       this.enemyIntents.clear();
+      this.enemyNavigation.clear();
       this.entry(
         'The body falls quiet',
         this.transferReady
@@ -7261,6 +7323,7 @@ export class Stichos {
     this.momentumUntil = 0;
     this.presentationCues = [];
     this.enemyIntents.clear();
+    this.enemyNavigation.clear();
     this.effects = [];
     this.refreshNpcs();
     this.visit();
@@ -7563,7 +7626,11 @@ export class Stichos {
       },
       lifeOrigin: this.originRecord ?? undefined,
       personalStories: this.personalStories.records.length ? this.personalStories : undefined,
-      production: this.production.structures.length ? this.production : undefined,
+      // Empty sites still retain their issued identities after the final platform is dismantled.
+      production:
+        this.production.serial || this.production.jobSerial || this.production.structures.length
+          ? this.production
+          : undefined,
       notebook: this.notebook,
       campaign: this.campaignState,
       winterCompact:
