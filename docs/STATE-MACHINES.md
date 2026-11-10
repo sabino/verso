@@ -180,7 +180,7 @@ The domain audit used isolated in-memory fixtures for guard and loyalty probes. 
 
 All 13 original findings now have concrete implementation and identified regression coverage in [Lifecycle closure](LIFECYCLE-CLOSURE.md#original-findings). Additional gaps in the 97-group inventory—including tab leasing, installation, route diagnostics, typed UI ownership, withdrawal semantics and observation purity—are mapped there as well. This closes those recorded implementation tasks; it does not assert that every possible state combination or network interleaving has been verified.
 
-- Domain/unit results, source integration and prepared native browser scenarios are distinguished in the [verification record](LIFECYCLE-CLOSURE.md#verification-record). The new hosted browser runs are pending; local Chromium and native Pear validation hit environment restrictions.
+- Domain/unit results, source integration and prepared native browser scenarios are distinguished in the [verification record](LIFECYCLE-CLOSURE.md#verification-record). The first hosted run at `f0127e2` passed portrait/first-life/earlier-route/platform stages and all 6 native Pear tests. Production stopped at a new Enter-chat input-guard bug; its correction and the complete browser rerun are tracked in [PR #5 checks](https://github.com/sabino/verso/pull/5/checks).
 - Browsers without Web Locks retain single-tab play with an explicit warning. `unsupported` is not an exclusive lease.
 - New estate recovery commands require the updated world authority. Older frames remain readable; the browser disables unsupported recovery rather than spending locally.
 - Withdrawn supply quests retain optional `outcome: withdrawn` and `complete: false`, preserving the no-reward interpretation for older readers.

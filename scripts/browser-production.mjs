@@ -330,12 +330,22 @@ try {
   const draft = 'A draft survives a refused room message.';
   await c.click('[data-chat-channel="world"]');
   await c.fill('#v-chat-input', draft);
+  assert.equal(
+    await c.read(
+      "document.querySelector('[data-chat-channel=world]').getAttribute('aria-pressed')",
+    ),
+    'true',
+  );
   await c.key('Enter', 'Enter', 13);
   await c.wait(
     "window.stichos.state.requests.chat?.status==='failed'",
     'room-only speech fails while solo',
   );
   assert.equal(await c.read("document.querySelector('#v-chat-input').value"), draft);
+  assert.match(
+    await c.read("document.querySelector('#v-chat-log').textContent"),
+    /Join or host a room/,
+  );
   assert.equal(await c.read('document.activeElement.id'), 'v-chat-input');
   await c.click('[data-chat-channel="say"]');
   await c.click('#v-chat-input');

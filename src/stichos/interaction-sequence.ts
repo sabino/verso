@@ -150,10 +150,41 @@ export function mountInteractionSequences(
     origins.delete(event.pointerId);
     ledger.finish(event.pointerId, true);
   };
-  let keyboard: { owner: HTMLElement; epoch: number; key: string } | null = null;
+  let keyboard: {
+    owner: HTMLElement;
+    epoch: number;
+    key: string;
+    implicitSubmitter: HTMLButtonElement | HTMLInputElement | null;
+    implicitForm: HTMLFormElement | null;
+  } | null = null;
   const keyDown = (event: KeyboardEvent) => {
-    if (!event.repeat && (event.key === 'Enter' || event.key === ' '))
-      keyboard = { owner: owner(event.target), epoch: ledger.diagnostics.epoch, key: event.key };
+    if (!event.repeat && (event.key === 'Enter' || event.key === ' ')) {
+      const element = owner(event.target);
+      // Enter in a one-line form field natively clicks that form's default
+      // submitter. Capture its identity now, so a replacement control cannot
+      // inherit the key just because it occupies the same form later.
+      const implicitSubmitter =
+        event.key === 'Enter' &&
+        element instanceof HTMLInputElement &&
+        /^(text|search|tel|url|email|password|date|month|week|time|datetime-local|number)$/.test(
+          element.type,
+        )
+          ? [...(element.form?.elements ?? [])].find(
+              (control): control is HTMLButtonElement | HTMLInputElement =>
+                (control instanceof HTMLButtonElement && control.type === 'submit') ||
+                (control instanceof HTMLInputElement &&
+                  (control.type === 'submit' || control.type === 'image')),
+            )
+          : null;
+      keyboard = {
+        owner: element,
+        epoch: ledger.diagnostics.epoch,
+        key: event.key,
+        implicitSubmitter:
+          implicitSubmitter && !implicitSubmitter.disabled ? implicitSubmitter : null,
+        implicitForm: element instanceof HTMLInputElement ? element.form : null,
+      };
+    }
   };
   const keyUp = (event: KeyboardEvent) => {
     if (keyboard?.key !== event.key) return;
@@ -165,7 +196,8 @@ export function mountInteractionSequences(
     });
   };
   const click = (event: MouseEvent) => {
-    if (forwardedClick === owner(event.target)) return;
+    const element = owner(event.target);
+    if (forwardedClick === element) return;
     const pointer = event as PointerEvent;
     const nativePointer =
       event.detail > 0 ||
@@ -173,13 +205,22 @@ export function mountInteractionSequences(
       !!(event as MouseEvent & { sourceCapabilities?: { firesTouchEvents?: boolean } })
         .sourceCapabilities?.firesTouchEvents;
     if (nativePointer) {
-      if (!ledger.click(pointer.pointerId > 0 ? pointer.pointerId : null, owner(event.target)))
+      if (!ledger.click(pointer.pointerId > 0 ? pointer.pointerId : null, element)) stop(event);
+    } else if (keyboard) {
+      const implicitSubmit =
+        keyboard.implicitSubmitter === element &&
+        keyboard.owner instanceof HTMLInputElement &&
+        keyboard.owner.isConnected &&
+        element.isConnected &&
+        !keyboard.implicitSubmitter.disabled &&
+        keyboard.implicitForm !== null &&
+        keyboard.owner.form === keyboard.implicitForm &&
+        keyboard.implicitSubmitter.form === keyboard.implicitForm;
+      if (
+        keyboard.epoch !== ledger.diagnostics.epoch ||
+        (keyboard.owner !== element && !implicitSubmit)
+      )
         stop(event);
-    } else if (
-      keyboard &&
-      (keyboard.owner !== owner(event.target) || keyboard.epoch !== ledger.diagnostics.epoch)
-    ) {
-      stop(event);
     }
   };
   const blur = () => {
