@@ -119,6 +119,7 @@ async function traveler(name) {
       code,
       windowsVirtualKeyCode: vk,
       modifiers,
+      ...(key === 'Enter' ? { text: '\r', unmodifiedText: '\r' } : {}),
     });
     if (hold) await delay(hold);
     await page.send('Input.dispatchKeyEvent', {
@@ -328,6 +329,15 @@ try {
   );
   // A refused delivery keeps the real draft; switching to local speech can retry it.
   const draft = 'A draft survives a refused room message.';
+  // Observe the native event path without changing form or game behavior.
+  await c.read(`(()=>{
+    const events=[];
+    for(const type of ['keydown','keypress','click','submit']) document.querySelector('#v-chat-form').addEventListener(type,event=>{
+      if(events.length<24) events.push({type,key:event.key??null,charCode:event.charCode??null,target:event.target.id,trusted:event.isTrusted});
+    },true);
+    window.__versoChatInputTrace=events;
+    return true;
+  })()`);
   await c.click('[data-chat-channel="world"]');
   await c.fill('#v-chat-input', draft);
   assert.equal(
@@ -669,6 +679,10 @@ try {
   console.error(error.stack);
   for (const c of clients) {
     await c.shot(`FAIL-${c.name.split(' ')[0]}`).catch(() => {});
+    fs.writeFileSync(
+      path.join(out, `FAIL-${c.name.split(' ')[0]}-input.json`),
+      JSON.stringify(await c.read('window.__versoChatInputTrace??[]').catch(() => []), null, 2),
+    );
     fs.writeFileSync(
       path.join(out, `FAIL-${c.name.split(' ')[0]}.json`),
       JSON.stringify(await c.state().catch(() => null), null, 2),
