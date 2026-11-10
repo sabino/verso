@@ -2,12 +2,13 @@
  * document: no real checkout, payment, entitlement server or gameplay state is modified. */
 import fs from 'node:fs';
 import path from 'node:path';
+import { measureStableClickTarget } from './browser-harness.mjs';
 const endpoint = process.argv[2];
 const origin = process.argv[3] ?? 'http://127.0.0.1:4173';
 for (const value of [endpoint, origin])
   if (!value || !['localhost', '127.0.0.1'].includes(new URL(value).hostname))
     throw Error('Use verified workspace CDP and local app URLs.');
-async function connect(url) {
+async function connect(url, events = () => {}) {
   const ws = new WebSocket(url);
   await new Promise((resolve, reject) => {
     const timer = setTimeout(() => {
@@ -30,8 +31,12 @@ async function connect(url) {
   let id = 0;
   const pending = new Map();
   ws.onmessage = (event) => {
-    const value = JSON.parse(event.data),
-      p = pending.get(value.id);
+    const value = JSON.parse(event.data);
+    if (!value.id) {
+      events(value);
+      return;
+    }
+    const p = pending.get(value.id);
     if (!p) return;
     clearTimeout(p.timer);
     pending.delete(value.id);
@@ -70,30 +75,38 @@ async function connect(url) {
 const version = await (
   await fetch(`${endpoint}/json/version`, { signal: AbortSignal.timeout(10000) })
 ).json();
+const fixtureUrl = new URL('/scripts/browser-store-fixture.html', origin).href;
+const fixtureResponse = await fetch(fixtureUrl, { signal: AbortSignal.timeout(10000) });
+if (!fixtureResponse.ok || !(await fixtureResponse.text()).includes('name="verso-store-fixture"'))
+  throw Error('The isolated store fixture document is unavailable; refusing the app fallback.');
 const browser = await connect(version.webSocketDebuggerUrl);
 const out = path.resolve(process.env.VERSO_STORE_EVIDENCE ?? '.dream-loop/stichos-progression');
 fs.mkdirSync(out, { recursive: true });
 let context, page;
 const checks = [];
+const errors = [];
 try {
   context = (await browser.send('Target.createBrowserContext')).browserContextId;
   const { targetId } = await browser.send('Target.createTarget', {
-    url: new URL('/src/stichos/store.ts', origin).href,
+    url: 'about:blank',
     browserContextId: context,
   });
   const target = (
     await (await fetch(`${endpoint}/json/list`, { signal: AbortSignal.timeout(10000) })).json()
   ).find((t) => t.id === targetId);
-  page = await connect(target.webSocketDebuggerUrl);
+  page = await connect(target.webSocketDebuggerUrl, ({ method, params }) => {
+    if (method === 'Runtime.exceptionThrown') errors.push(params.exceptionDetails);
+    if (method === 'Runtime.consoleAPICalled' && params.type === 'error') errors.push(params.args);
+  });
   await page.send('Runtime.enable');
   await page.send('Page.enable');
+  await page.send('Emulation.setFocusEmulationEnabled', { enabled: true });
   await page.send('Emulation.setDeviceMetricsOverride', {
     width: 1120,
     height: 800,
     deviceScaleFactor: 1,
     mobile: false,
   });
-  await new Promise((resolve) => setTimeout(resolve, 600));
   const evaluate = async (expression) => {
     const r = await page.send('Runtime.evaluate', {
       expression,
@@ -104,6 +117,25 @@ try {
       throw Error(r.exceptionDetails.exception?.description ?? r.exceptionDetails.text);
     return r.result.value;
   };
+  const wait = async (expression, label, timeout = 10000) => {
+    const deadline = Date.now() + timeout;
+    while (Date.now() < deadline) {
+      const ready = await evaluate(expression).catch((error) => {
+        // Navigation can retire the initial about:blank execution context.
+        if (/Execution context was destroyed|Cannot find context/.test(error.message)) return false;
+        throw error;
+      });
+      if (ready) return;
+      await new Promise((resolve) => setTimeout(resolve, 50));
+    }
+    throw Error(`Store fixture timeout: ${label}`);
+  };
+  await page.send('Page.navigate', { url: fixtureUrl });
+  await wait(
+    `location.href===${JSON.stringify(fixtureUrl)} && document.readyState==='complete' && !!document.querySelector('meta[name="verso-store-fixture"]')`,
+    'isolated document ready',
+  );
+  await page.send('Page.bringToFront');
   const check = async (label, expression) => {
     const value = await evaluate(expression);
     if (!value) throw Error(label);
@@ -117,7 +149,8 @@ try {
       await import('/src/stichos/style.css');
       document.body.replaceChildren();
       document.title = 'Stichos isolated store fixture';
-      document.body.style.cssText = 'overflow:auto;height:auto;background:#12242d;padding:24px';
+      document.documentElement.style.cssText = 'overflow:visible;height:auto';
+      document.body.style.cssText = 'overflow:visible;height:auto;background:#12242d;padding:24px';
       const container = document.createElement('main');
       container.style.cssText = 'max-width:1040px;margin:auto';
       document.body.append(container);
@@ -249,10 +282,21 @@ try {
     'Configured test catalog renders real server amount and test label',
     `storeFixture.text().includes('$10.99') && storeFixture.text().includes('Test mode') && !document.querySelector('[data-store-action="buy:aurora-mantle"]').disabled && !document.querySelector('.s-store img')`,
   );
-  const click = async (selector) => {
-    const p = await evaluate(
-      `(() => { const node = document.querySelector(${JSON.stringify(selector)});node.scrollIntoView({block:'center'}); const b = node.getBoundingClientRect(); return {x:b.x+b.width/2,y:b.y+b.height/2}; })()`,
-    );
+  const click = async (selector, waitForIdle = true) => {
+    let p;
+    for (let attempt = 0; attempt < 24; attempt++) {
+      await page.send('Page.bringToFront');
+      p = await evaluate(`(${measureStableClickTarget.toString()})(${JSON.stringify(selector)})`);
+      if (!p.scroll) break;
+      await page.send('Input.dispatchMouseEvent', {
+        type: 'mouseWheel',
+        ...p.scroll,
+        deltaX: 0,
+        deltaY: p.delta || 120,
+      });
+      await new Promise((resolve) => setTimeout(resolve, 80));
+    }
+    if (p?.scroll || !p) throw Error(`Store fixture target is unreachable: ${selector}`);
     await page.send('Input.dispatchMouseEvent', {
       type: 'mousePressed',
       ...p,
@@ -265,7 +309,11 @@ try {
       button: 'left',
       clickCount: 1,
     });
-    await new Promise((resolve) => setTimeout(resolve, 150));
+    if (waitForIdle)
+      await wait(
+        `document.querySelector('[data-store-action="refresh"]')?.disabled===false`,
+        `wallet action settled after ${selector}`,
+      );
   };
   await click('[data-store-action="buy:aurora-mantle"]');
   await check(
@@ -328,6 +376,9 @@ try {
     deviceScaleFactor: 1,
     mobile: false,
   });
+  await evaluate(
+    'new Promise(resolve => requestAnimationFrame(() => requestAnimationFrame(resolve)))',
+  );
   await check(
     'Mobile store has no horizontal overflow',
     `document.documentElement.scrollWidth <= innerWidth && [...document.querySelectorAll('.s-store-card')].every(c=>c.getBoundingClientRect().right <= innerWidth)`,
@@ -363,7 +414,7 @@ try {
   await evaluate(
     `(()=>{storeFixture.holdNext('recover');const input=document.querySelector('[data-store-action="restore-code"]');input.value='VR1-'+'b'.repeat(64);input.dispatchEvent(new Event('input',{bubbles:true}));storeFixture.beforeWalletReads=storeFixture.calls.filter(c=>c.url.endsWith('/wallet')).length;})()`,
   );
-  await click('[data-store-action="restore-wallet"]');
+  await click('[data-store-action="restore-wallet"]', false);
   await evaluate(`storeFixture.heldStarted`);
   // Returning the mount promise would make CDP await the recovery release
   // scheduled below, deadlocking the very queue ordering this scenario tests.
@@ -438,6 +489,7 @@ try {
     }.toString()})()`,
   );
   fs.writeFileSync(path.join(out, 'home-furniture.png'), Buffer.from(image, 'base64'));
+  if (errors.length) throw Error(`Unexpected store runtime errors: ${JSON.stringify(errors)}`);
   fs.writeFileSync(
     path.join(out, 'store-results.json'),
     JSON.stringify(

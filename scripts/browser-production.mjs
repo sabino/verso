@@ -5,6 +5,7 @@
 import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
+import { createServer } from 'node:http';
 import { fileURLToPath } from 'node:url';
 import { measureStableClickTarget } from './browser-harness.mjs';
 import { routeBeyondDistance } from './browser-route.mjs';
@@ -30,7 +31,58 @@ const pass = (name, detail = '') => {
   results.push({ name, detail });
   console.log(`PASS ${name}: ${detail}`);
 };
-let browser, failure;
+let browser, failure, companionFixture;
+async function startCompanionFixture() {
+  const requests = [],
+    pending = [];
+  const server = createServer((request, response) => {
+    if (request.headers.origin !== new URL(url).origin || request.url !== '/api/ai/pair') {
+      response.writeHead(403).end();
+      return;
+    }
+    response.setHeader('Access-Control-Allow-Origin', new URL(url).origin);
+    response.setHeader('Access-Control-Allow-Methods', 'POST, OPTIONS');
+    response.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+    response.setHeader('Access-Control-Allow-Private-Network', 'true');
+    if (request.method === 'OPTIONS') {
+      response.writeHead(204).end();
+      return;
+    }
+    if (request.method !== 'POST') {
+      response.writeHead(405).end();
+      return;
+    }
+    let body = '';
+    request.on('data', (chunk) => {
+      body += chunk;
+      if (body.length > 1024) request.destroy();
+    });
+    request.on('end', () => {
+      requests.push({ method: request.method, path: request.url, body });
+      pending.push(response);
+    });
+  });
+  await new Promise((resolve, reject) => {
+    server.once('error', reject);
+    server.listen(4176, '127.0.0.1', resolve);
+  });
+  return {
+    requests,
+    release() {
+      for (const response of pending.splice(0))
+        if (!response.destroyed)
+          response
+            .writeHead(200, { 'Content-Type': 'application/json' })
+            .end(JSON.stringify({ token: 'a'.repeat(43) }));
+    },
+    async close() {
+      await new Promise((resolve) => {
+        server.close(resolve);
+        server.closeAllConnections();
+      });
+    },
+  };
+}
 async function connect(address, events = () => {}) {
   const ws = new WebSocket(address);
   await new Promise((resolve, reject) => {
@@ -77,11 +129,9 @@ async function traveler(name) {
   });
   const targets = await (await fetch(`${endpoint}/json/list`)).json();
   const wire = [];
-  const intercepted = [];
   const page = await connect(
     targets.find((t) => t.id === targetId).webSocketDebuggerUrl,
     (method, params) => {
-      if (method === 'Fetch.requestPaused') intercepted.push(params);
       if (method === 'Network.webSocketFrameSent' || method === 'Network.webSocketFrameReceived') {
         try {
           const m = JSON.parse(params.response.payloadData);
@@ -211,7 +261,6 @@ async function traveler(name) {
     name,
     page,
     wire,
-    intercepted,
     browserContextId,
     read,
     wait,
@@ -367,30 +416,42 @@ try {
   assert.ok((await c.read("document.querySelector('#v-chat-log').textContent")).includes(draft));
   pass('A failed chat send preserves the draft and focus; accepted retry clears it');
 
-  // Delay the external companion response, close its screen, then release the request.
-  // CDP controls only the network boundary; all application actions use native input.
+  // A test-only loopback service answers preflight, then holds the actual pair response.
+  // It invokes no real companion or authentication; application actions remain native.
+  companionFixture = await startCompanionFixture();
   await c.click('#s-sound');
   await c.click('.v-app-diagnostics > summary');
   await c.click('#v-ai');
   await c.click('[data-screen="ai"] details > summary');
-  await c.page.send('Fetch.enable', { patterns: [{ urlPattern: 'http://127.0.0.1:4176/*' }] });
   await c.fill('#v-ai-code', 'abcdefghijklmnopqrstuvwxyz123456');
   await c.click('#v-ai-pair button');
   const companionDeadline = Date.now() + 10000;
-  while (!c.intercepted.length && Date.now() < companionDeadline) await delay(50);
-  assert.ok(c.intercepted.length, 'Companion check reached the intercepted external request');
+  while (!companionFixture.requests.length && Date.now() < companionDeadline) await delay(50);
+  assert.deepEqual(
+    companionFixture.requests,
+    [
+      {
+        method: 'POST',
+        path: '/api/ai/pair',
+        body: JSON.stringify({ code: 'abcdefghijklmnopqrstuvwxyz123456' }),
+      },
+    ],
+    'Companion check reached the real loopback fixture with its native form value',
+  );
+  await c.wait(
+    "window.stichos.state.requests.panel?.status==='pending'&&document.querySelector('#v-ai-pair button').disabled&&document.querySelector('#v-ai-status').textContent==='Checking the local companion…'",
+    'the held companion request has a visible pending state',
+  );
   await c.click('#v-ai-close');
-  for (const request of c.intercepted.splice(0))
-    await c.page
-      .send('Fetch.failRequest', { requestId: request.requestId, errorReason: 'Aborted' })
-      .catch(() => {});
-  await c.page.send('Fetch.disable');
+  companionFixture.release();
   await c.wait(
     "window.stichos.state.modal===''&&window.stichos.state.requests.panel?.status==='cancelled'",
     'closing companion setup settles its presentation owner',
   );
   await delay(150);
   assert.equal((await c.state()).modal, '');
+  await companionFixture.close();
+  companionFixture = null;
   pass('Closing an in-flight companion check cancels its owner without reopening detached UI');
 
   const keyWalk = async (point) => {
@@ -689,6 +750,7 @@ try {
     );
   }
 } finally {
+  await companionFixture?.close();
   fs.writeFileSync(
     path.join(out, 'results.json'),
     JSON.stringify(

@@ -50,7 +50,8 @@ export class AICompanion {
         'invalid_endpoint',
       );
     this.endpoint = url.origin;
-    this.transport = transport;
+    // Browser fetch rejects an AICompanion instance as its receiver.
+    this.transport = (input, init) => transport(input, init);
   }
   get paired() {
     return !!this.token;

@@ -22,6 +22,22 @@ function deferred<T>() {
   const promise = new Promise<T>((yes) => (resolve = yes));
   return { resolve, promise };
 }
+test('companion transport is called without an instance receiver, as browser fetch requires', async () => {
+  const paths: string[] = [];
+  const client = new AICompanion({
+    transport: async function (this: unknown, url) {
+      assert.equal(this, undefined, 'A native fetch function must not receive the client as this');
+      paths.push(String(url));
+      return response(String(url).endsWith('/pair') ? { token: 'a'.repeat(43) } : status);
+    },
+  });
+  assert.deepEqual(await client.pair(code), status);
+  assert.deepEqual(paths, [
+    'http://127.0.0.1:4176/api/ai/pair',
+    'http://127.0.0.1:4176/api/ai/status',
+  ]);
+  assert.equal(client.paired, true);
+});
 test('cancelled pair settles without a cooperative transport and cannot install a late token', async () => {
   const pending = deferred<Response>();
   const client = new AICompanion({ transport: (() => pending.promise) as typeof fetch });
