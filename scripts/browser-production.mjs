@@ -6,6 +6,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import assert from 'node:assert/strict';
 import { fileURLToPath } from 'node:url';
+import { measureStableClickTarget } from './browser-harness.mjs';
 const endpoint = process.argv[2],
   url = process.argv[3] || 'http://localhost:4174/';
 if (
@@ -145,9 +146,8 @@ async function traveler(name, seed = '3886') {
   };
   const click = async (selector) => {
     for (let attempt = 0; attempt < 12; attempt++) {
-      const g = await read(
-        `(()=>{const e=document.querySelector(${JSON.stringify(selector)});if(!e||e.disabled)throw Error('Missing control '+${JSON.stringify(selector)});const r=e.getBoundingClientRect();let top=0,bottom=innerHeight,scroller=null;for(let p=e.parentElement;p;p=p.parentElement){const s=getComputedStyle(p),b=p.getBoundingClientRect();if(/auto|scroll|hidden/.test(s.overflowY)){top=Math.max(top,b.top);bottom=Math.min(bottom,b.bottom);if(/auto|scroll/.test(s.overflowY)&&p.scrollHeight>p.clientHeight+1&&!scroller)scroller={x:b.x+b.width/2,y:b.y+b.height/2};}}const x=r.x+r.width/2,y=(Math.max(r.top,top)+Math.min(r.bottom,bottom))/2;if(r.bottom<=top||r.top>=bottom||!e.contains(document.elementFromPoint(x,y)))return{scroll:scroller??{x:innerWidth/2,y:innerHeight/2},delta:Math.max(-500,Math.min(500,(r.top+r.bottom)/2-(top+bottom)/2))};return{x,y};})()`,
-      );
+      await focus();
+      const g = await read(`(${measureStableClickTarget.toString()})(${JSON.stringify(selector)})`);
       if (g.scroll) {
         await page.send('Input.dispatchMouseEvent', {
           type: 'mouseWheel',
@@ -236,6 +236,7 @@ async function traveler(name, seed = '3886') {
   await page.send('Page.navigate', { url });
   await focus();
   await wait("window.stichos?.state.modal==='title'", 'title ready');
+  await read('document.fonts.ready.then(()=>true)');
   await fill('#s-seed-input', seed);
   await click('#v-theo-story');
   await wait('window.stichos.state.transfer', 'opening intro');
