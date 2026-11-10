@@ -150,6 +150,8 @@ New generation-four worlds couple smoothly varying elevation, rainfall, temperat
 
 Read [generated worlds and lives](docs/stichos/GENERATED-LIVES.md), [ordinary equipment](docs/stichos/ORDINARY-EQUIPMENT.md), the [generation references supplied by Sabino](docs/stichos/REFERENCES.md), [visual direction](docs/stichos/VISUALS.md), and [browser QA](docs/stichos/QA.md). [Story canon](docs/stichos/CANON.md) describes the optional legacy campaign.
 
+The [state-machine inventory and interaction contracts](docs/STATE-MACHINES.md) map runtime ownership, legal transitions, coverage and unresolved recovery gaps.
+
 ## Verification
 
 ```sh

@@ -103,6 +103,22 @@ export interface GuildMember {
   reconciliationCount: number;
   remembered: string[];
 }
+export type GuildMembershipAction = 'discover' | 'join' | 'dues' | 'duty' | 'leave' | 'reconcile';
+/** Lifecycle actions only. The authority still checks contact, payment, evidence and rival oaths. */
+export function guildMembershipActions(
+  member?: Pick<GuildMember, 'discovered' | 'status'>,
+): readonly GuildMembershipAction[] {
+  if (!member?.discovered) return ['discover'];
+  switch (member.status) {
+    case 'visitor':
+    case 'left':
+      return ['join'];
+    case 'member':
+      return ['dues', 'duty', 'leave'];
+    case 'expelled':
+      return ['reconcile'];
+  }
+}
 export interface GuildDuty {
   id: string;
   day: number;

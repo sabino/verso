@@ -261,6 +261,68 @@ try {
     'A fresh Theo life starts with its real inherited tools and finite coins',
     String(initial.player.coins),
   );
+  assert.equal(initial.interaction.schemaVersion, 1);
+  assert.equal(initial.interaction.lifecycle, 'playing');
+  assert.equal(initial.interaction.surface.kind, 'world');
+  if (await c.read("document.querySelector('.s-shell').classList.contains('chat-collapsed')"))
+    await c.click('#v-compose-toggle');
+  const chatRoute = await c.read(
+    `(()=>{const g=window.stichos,s=g.state;return (${routeBeyondDistance.toString()})(s.player,s.player,(x,y)=>g.blocked(x,y)||g.props(x,y,1).some(p=>Math.hypot(p.x-x,p.y-y)<.9)||s.npcs.some(n=>n.hp>0&&Math.hypot(n.x-x,n.y-y)<1.2),5,12);})()`,
+  );
+  assert.ok(chatRoute, 'A reachable empty destination exists for the chat interruption check');
+  const chatDestination = chatRoute.at(-1);
+  const beforeTravel = (await c.state()).player;
+  await c.worldClick(chatDestination);
+  await c.wait(
+    `window.stichos.state.travel.state==='walking'&&Math.hypot(window.stichos.state.player.x-(${beforeTravel.x}),window.stichos.state.player.y-(${beforeTravel.y}))>.05`,
+    'native ground click starts actual automatic walking',
+  );
+  await c.click('#v-chat-input');
+  await c.wait(
+    "window.stichos.state.interaction.focus==='text'&&window.stichos.state.travel.state==='idle'",
+    'chat focus cancels the active route',
+  );
+  const typing = await c.state();
+  assert.equal(typing.interaction.capabilities.move.allowed, false);
+  assert.equal(typing.interaction.capabilities.move.reason, 'text-entry');
+  await c.page.send('Input.insertText', { text: 'wasd while composing, not while walking' });
+  await delay(650);
+  const typed = await c.state();
+  assert.ok(
+    Math.hypot(typed.player.x - typing.player.x, typed.player.y - typing.player.y) < 0.01,
+    'The player remains still while composing chat',
+  );
+  assert.equal(typed.travel.state, 'idle');
+  await c.shot('01a-chat-interrupts-travel');
+  // Clear the unsent draft and use the input's native Escape behavior to leave it.
+  await c.key('a', 'KeyA', 65, 0, 2);
+  await c.key('Backspace', 'Backspace', 8);
+  await c.key('Escape', 'Escape', 27);
+  await c.wait(
+    "window.stichos.state.interaction.focus==='world'&&window.stichos.state.interaction.capabilities.move.allowed",
+    'leaving chat restores movement capability',
+  );
+  await c.click('#s-pause');
+  await c.wait(
+    "window.stichos.state.interaction.surface.kind==='modal'&&window.stichos.state.interaction.surface.name==='pause'",
+    'Pause exposes its semantic interaction surface',
+  );
+  const paused = await c.state();
+  assert.equal(paused.interaction.capabilities.simulate.allowed, false);
+  await delay(180);
+  assert.equal((await c.state()).time, paused.time, 'The pause surface stops solo simulation');
+  await c.click('#v-pause-resume');
+  await c.wait(
+    "window.stichos.state.interaction.surface.kind==='world'&&window.stichos.state.interaction.capabilities.move.allowed",
+    'resuming restores the world interaction surface',
+  );
+  pass(
+    'Automatic travel stops for chat, typing stays still, and Pause exposes blocked simulation',
+    JSON.stringify({
+      destination: chatDestination,
+      blockedReason: typing.interaction.capabilities.move.reason,
+    }),
+  );
   const keyWalk = async (point) => {
     for (let n = 0; n < 30; n++) {
       const p = (await c.state()).player,
@@ -330,6 +392,33 @@ try {
   console.log('Garden site', site);
   await approach({ ...site, id: 'garden site' });
   const before = await c.state();
+  await c.click('#v-work');
+  await c.click('[data-build-kind="garden"]');
+  await c.wait(
+    "window.stichos.state.interaction.placement==='production'&&document.querySelector('[data-action=attack]').disabled&&document.querySelector('[data-portrait-action=attack]').disabled",
+    'desktop and touch combat controls agree during placement',
+  );
+  const placement = (await c.state()).interaction;
+  assert.equal(
+    placement.capabilities.move.allowed,
+    true,
+    'Construction still allows approaching the site',
+  );
+  assert.equal(placement.capabilities.combat.reason, 'placement');
+  await c.key('f', 'KeyF', 70);
+  assert.equal((await c.state()).modal, '', 'Strike cannot leave construction to open equipment');
+  await c.click('#s-pause');
+  assert.equal(
+    (await c.state()).interaction.placement,
+    'none',
+    'Opening a menu cancels the pending blueprint',
+  );
+  assert.deepEqual(
+    (await c.state()).inventory,
+    before.inventory,
+    'Cancelled placement consumes nothing',
+  );
+  await c.click('#v-pause-resume');
   await c.click('#v-work');
   await c.click('[data-build-kind="garden"]');
   await c.worldClick(site);
