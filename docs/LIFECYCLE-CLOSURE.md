@@ -78,3 +78,9 @@ The native Enter correction binds the original one-line input, form and default 
 Initial local Chromium singleton-socket and native Pear network-interface permission failures are historical environment observations, superseded by this complete hosted pass. Public world-node rollout remains a separate pending operation; the hosted test result does not claim that the live authority has been upgraded.
 
 The 97-group inventory remains a source map. These closures address the recorded defects and gaps; future failures need their own reproducible transition, recovery invariant and evidence rather than an assumption that a finite test suite covered every interleaving.
+
+### Publication retention correction
+
+Public verification after the `1323357` rollout found a separate deployment lifecycle defect: the current bundle was available, but the previous `ad301b5` entry (`assets/index-DSf1tkbb.js`) returned 404. The build had selected the first release returned by GitHub, `pages-e9e96fe…`, although newer retained archives existed. API order did not represent publication order, and the resulting archives had diverged.
+
+Retention now merges every complete published Pages archive, in a deterministic order, before creating the next archive. Sorting and choosing only the latest would preserve the already incomplete history. Missing/incomplete archives, unsafe archive entries and different bytes under the same asset name fail publication; no existing generation is deliberately evicted. Selection tests cover unordered/paginated history, and the archive regression preserves unique older and newer entries alongside shared bytes. This policy trades additional archive downloads for retaining open-tab compatibility; a future compaction policy must prove coverage before skipping generations.

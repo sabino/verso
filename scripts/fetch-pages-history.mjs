@@ -1,7 +1,11 @@
 import fs from 'node:fs';
+import path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { mergeArchive } from './prepare-pages.mjs';
+import { retainedPagesReleases } from './pages-history.mjs';
 const out = '.dream-loop/pages-history';
 fs.mkdirSync(out, { recursive: true });
+const staging = fs.mkdtempSync(path.join(out, 'retention-'));
 const config = JSON.parse(fs.readFileSync('migration/hosting.json', 'utf8'));
 const gh = (...args) =>
   execFileSync('gh', args, { encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
@@ -24,26 +28,39 @@ gh(
 const releases = JSON.parse(
   gh('api', `repos/${config.repository}/releases?per_page=100`, '--paginate', '--slurp'),
 );
-const latest = releases
-  .flat()
-  .find((release) => !release.draft && /^pages-[a-f0-9]{40}$/.test(release.tag_name));
-if (latest) {
+const history = retainedPagesReleases(releases);
+const retained = path.join(staging, 'combined');
+fs.mkdirSync(path.join(retained, 'assets'), { recursive: true });
+// API ordering is not a publication order, and earlier archives may have diverged.
+// Recover their union; choosing even the newest archive can strand an open tab.
+for (const release of history) {
+  const download = path.join(staging, release.tag_name);
+  fs.mkdirSync(download);
   gh(
     'release',
     'download',
-    latest.tag_name,
+    release.tag_name,
     '--repo',
     config.repository,
     '--pattern',
     'retained-assets-next.tar.gz',
     '--dir',
-    out,
+    download,
   );
-  fs.renameSync(`${out}/retained-assets-next.tar.gz`, `${out}/retained-assets.tar.gz`);
-} else {
-  fs.mkdirSync(`${out}/empty/assets`, { recursive: true });
-  execFileSync('tar', ['-czf', `${out}/retained-assets.tar.gz`, '-C', `${out}/empty`, 'assets']);
+  mergeArchive(path.join(download, 'retained-assets-next.tar.gz'), retained, 'retained');
 }
+execFileSync('tar', [
+  '-czf',
+  path.join(staging, 'retained-assets.tar.gz'),
+  '-C',
+  retained,
+  'assets',
+]);
+fs.renameSync(path.join(staging, 'retained-assets.tar.gz'), `${out}/retained-assets.tar.gz`);
+fs.rmSync(staging, { recursive: true, force: true });
 console.log(
-  JSON.stringify({ migration: config.legacyArchive.tag, previousPages: latest?.tag_name ?? null }),
+  JSON.stringify({
+    migration: config.legacyArchive.tag,
+    retainedPages: history.map((r) => r.tag_name),
+  }),
 );
